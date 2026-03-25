@@ -1012,27 +1012,15 @@ void App::updateImagePairFromPressedKeys()
     if (enableCompareView && isSwap) {
         std::swap(mCmpImageIndex, mTopImageIndex);
         mTopImageRenderTexIdx ^= 1;
-    } else if (enableCompareView && imageNum > 2) {
-        // Rotate compared image, shift further if it collides top image.
-        if (isNext) {
-            mCmpImageIndex = (mCmpImageIndex + 1) % imageNum;
-            if (mCmpImageIndex == mTopImageIndex) {
-                mCmpImageIndex = (mCmpImageIndex + 1) % imageNum;
-            }
-        } else if (isPrev) {
-            mCmpImageIndex = (mCmpImageIndex - 1 + imageNum) % imageNum;
-            if (mCmpImageIndex == mTopImageIndex) {
-                mCmpImageIndex = (mCmpImageIndex - 1 + imageNum) % imageNum;
-            }
-        }
-    } else if (!enableCompareView) {
-        // Rotate top image, if it collides compared image, shift compared image.
+    } else if (isNext || isPrev) {
+        // Same stepping in Top, Split, and Column: advance top and keep cmp distinct.
+        // (Previously compare mode only moved cmp when n>2, so n==2 in split had no effect for arrows.)
         if (isNext) {
             mTopImageIndex = (mTopImageIndex + 1) % imageNum;
             if (mCmpImageIndex == mTopImageIndex) {
                 mCmpImageIndex = (mCmpImageIndex + 1) % imageNum;
             }
-        } else if (isPrev) {
+        } else {
             mTopImageIndex = (mTopImageIndex - 1 + imageNum) % imageNum;
             if (mCmpImageIndex == mTopImageIndex) {
                 mCmpImageIndex = (mCmpImageIndex - 1 + imageNum) % imageNum;
