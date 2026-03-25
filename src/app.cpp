@@ -594,8 +594,10 @@ void App::run(CompositeFlags initFlags)
         
         ImGuiIO& io = ImGui::GetIO();
 
-        if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow) &&
-            !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) {
+        // Use WantCaptureMouse + GLFW focus, not "!AnyWindowFocused". Toolbar items call
+        // SetItemDefaultFocus(), so an ImGui window always has focus at startup and would
+        // block pan/scroll until the user clicked away — even with the mouse over the image.
+        if (glfwGetWindowAttrib(mWindow, GLFW_FOCUSED) && !io.WantCaptureMouse) {
             updateImageSplitterPos(io);
         }
 
@@ -863,7 +865,8 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
 
     mImageScale = inSideBySideMode() ? mColumnViews[0].getImageScale() : mView.getImageScale();
 
-    bool onFocus = !ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow);
+    // Mouse on image: GLFW window focused and ImGui not consuming mouse this frame (see run()).
+    const bool imageMouseActive = glfwGetWindowAttrib(mWindow, GLFW_FOCUSED) && !io.WantCaptureMouse;
     float oldImageScale = mImageScale;
     
     static bool isInSniperMode = false;
@@ -874,7 +877,12 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
         isInSniperMode = false;
     }
 
-    if (onFocus) {
+    if (imageMouseActive) {
+        const bool doingCtrlMmbZoom = !mIsMovingSplitter && ImGui::IsMouseDown(2) && io.KeyCtrl;
+        if (!doingCtrlMmbZoom) {
+            mCtrlMmbZoomPivotLocked = false;
+        }
+
         if (ImGui::IsMouseReleased(0) || ImGui::IsMouseReleased(1) || ImGui::IsMouseReleased(2)) {
             mIsScalingImage = false;
         }
@@ -885,11 +893,20 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
             mIsScalingImage = true;
         } else if (!mIsMovingSplitter && ImGui::IsMouseDown(2)) {
             if (io.KeyCtrl) {
-                // Ctrl + MMB drag horizontally: zoom toward cursor (right = in, left = out).
-                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                scalePivot = fetchScalePivot(io, useColumnView, mViewSplitPos, mouseAtRightColumn);
+                // Ctrl + MMB drag: zoom about the point under the cursor when the gesture started (pivot fixed until MMB/Ctrl released).
+                // Right or up = in; left or down = out (ImGui MouseDelta.y is positive downward).
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                if (!mCtrlMmbZoomPivotLocked) {
+                    bool atRightCol = false;
+                    mCtrlMmbZoomPivot = fetchScalePivot(io, useColumnView, mViewSplitPos, atRightCol);
+                    mCtrlMmbZoomRightColumn = atRightCol;
+                    mCtrlMmbZoomPivotLocked = true;
+                }
+                scalePivot = mCtrlMmbZoomPivot;
+                mouseAtRightColumn = mCtrlMmbZoomRightColumn;
                 static constexpr float kMmbZoomSensitivity = 0.003f;
-                mImageScale *= glm::clamp(1.0f + io.MouseDelta.x * kMmbZoomSensitivity, 0.25f, 4.0f);
+                const float zoomDrag = (io.MouseDelta.x - io.MouseDelta.y) * kMmbZoomSensitivity;
+                mImageScale *= glm::clamp(1.0f + zoomDrag, 0.25f, 4.0f);
                 mIsScalingImage = true;
             } else { // MMB pan
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -920,7 +937,7 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
     // "lines to scroll" (|wheel| > 1) does not apply multiple doublings at once;
     // use a modest factor per tick instead of 2^|wheel|.
     static constexpr float kScrollZoomFactor = 1.12f;
-    if (onFocus && io.MouseWheel != 0.0f) {
+    if (imageMouseActive && io.MouseWheel != 0.0f) {
         scalePivot = fetchScalePivot(io, useColumnView, mViewSplitPos, mouseAtRightColumn);
 
         if (io.MouseWheel > 0.0f) {

@@ -267,6 +267,9 @@ private:
 
     bool        mIsMovingSplitter = false;
     bool        mIsScalingImage = false;
+    bool        mCtrlMmbZoomPivotLocked = false;
+    Vec2f       mCtrlMmbZoomPivot = Vec2f(-1.0f);
+    bool        mCtrlMmbZoomRightColumn = false;
     bool        mEnableToneMapping = false;
     bool        mShowPixelValues = false;
     bool        mAboutToTerminate = false;
