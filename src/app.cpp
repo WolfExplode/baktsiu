@@ -814,22 +814,20 @@ void    App::onKeyPressed(const ImGuiIO& io)
 void    App::updateImageSplitterPos(ImGuiIO& io)
 {
     if (!shouldShowSplitter()) {
+        mIsMovingSplitter = false;
         return;
     }
 
-    const bool isHoverSplitter = !ImGui::IsMouseDragging(0) && std::abs((io.MousePos.x / io.DisplaySize.x) - mViewSplitPos) < 1e-2f;
+    const float mouseXNorm = io.MousePos.x / io.DisplaySize.x;
+    const bool isHoverSplitter = !ImGui::IsMouseDragging(0) && std::abs(mouseXNorm - mViewSplitPos) < 1e-2f;
     ImGui::SetMouseCursor(isHoverSplitter || mIsMovingSplitter ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_Arrow);
 
-    if (ImGui::IsMouseDown(0)) { // LMB pressed
-        if (isHoverSplitter) {
-            mIsMovingSplitter = true;
-        }
+    // LMB anywhere on the image viewport (no ImGui window hovered) moves the compare split — click or drag.
+    if (ImGui::IsMouseDown(0)) {
+        mIsMovingSplitter = true;
+        mViewSplitPos = glm::clamp(mouseXNorm, 0.02f, 0.98f);
     } else {
         mIsMovingSplitter = false;
-    }
-
-    if (mIsMovingSplitter) {
-        mViewSplitPos = glm::clamp(io.MousePos.x / io.DisplaySize.x, 0.02f, 0.98f);
     }
 }
 
@@ -881,8 +879,8 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
             mIsScalingImage = false;
         }
 
-        if (ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
-            // Scale the image when both left and right buttons are pressed.
+        if (!shouldShowSplitter() && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
+            // Scale the image when both left and right buttons are pressed (disabled while compare split is active — LMB is for the split bar).
             mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
             mIsScalingImage = true;
         } else if (!mIsMovingSplitter && ImGui::IsMouseDown(2)) {
@@ -1660,6 +1658,7 @@ void    App::initHomeWindow(const char* name)
                 ImGui::Separator();
                 ImGui::Text("Pan");
                 ImGui::Text("Offset Column View");
+                ImGui::Text("Move compare split (Split / Column)");
                 ImGui::Text("Zoom In/Out\n ");
                 ImGui::Text("Zoom In/Out in Power-of-Two");
                 ImGui::Text("Zoom to Actual Size");
@@ -1670,7 +1669,8 @@ void    App::initHomeWindow(const char* name)
 
                 ImGui::Text("Drag Middle Mouse Button");
                 ImGui::Text("Drag Middle Mouse Button + Alt");
-                ImGui::Text("Mouse Scroll or\nDrag Left + Right Mouse Buttons Vertically");
+                ImGui::Text("Left click / drag on image");
+                ImGui::Text("Mouse Scroll or\nDrag L+R Buttons Vertically\n(not in Split/Column compare)");
                 ImGui::Text("+/-");
                 ImGui::Text("/ or F");
                 ImGui::Text("Shift+F");
