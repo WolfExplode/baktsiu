@@ -1,4 +1,4 @@
-﻿#define IMGUI_DEFINE_MATH_OPERATORS
+#define IMGUI_DEFINE_MATH_OPERATORS
 #include <icons_font_awesome5.h>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -847,6 +847,21 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
     }
 
     Vec2f scalePivot(-1.0f);
+    bool mouseAtRightColumn = false;
+    auto fetchScalePivot = [](const ImGuiIO& io, bool useColumnView, float viewSplitPos, bool& mouseAtRightColumn) {
+        mouseAtRightColumn = false;
+        Vec2f scalePivot(io.MousePos.x, io.DisplaySize.y - io.MousePos.y);
+        if (useColumnView) {
+            float leftColumnWidth = io.DisplaySize.x * viewSplitPos;
+            if (scalePivot.x > leftColumnWidth) {
+                scalePivot.x -= leftColumnWidth;
+                mouseAtRightColumn = true;
+            }
+        }
+
+        scalePivot = glm::round(scalePivot + Vec2f(0.5f)) - Vec2f(0.5f);
+        return scalePivot;
+    };
 
     mImageScale = inSideBySideMode() ? mColumnViews[0].getImageScale() : mView.getImageScale();
 
@@ -862,7 +877,7 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
     }
 
     if (onFocus) {
-        if (ImGui::IsMouseReleased(0) || ImGui::IsMouseReleased(1)) {
+        if (ImGui::IsMouseReleased(0) || ImGui::IsMouseReleased(1) || ImGui::IsMouseReleased(2)) {
             mIsScalingImage = false;
         }
 
@@ -870,63 +885,50 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
             // Scale the image when both left and right buttons are pressed.
             mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
             mIsScalingImage = true;
-        } else if (!mIsMovingSplitter && ImGui::IsMouseDown(0)) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        } else if (!mIsMovingSplitter && ImGui::IsMouseDown(2)) {
+            if (io.KeyCtrl) {
+                // Ctrl + MMB drag horizontally: zoom toward cursor (right = in, left = out).
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                scalePivot = fetchScalePivot(io, useColumnView, mViewSplitPos, mouseAtRightColumn);
+                static constexpr float kMmbZoomSensitivity = 0.003f;
+                mImageScale *= glm::clamp(1.0f + io.MouseDelta.x * kMmbZoomSensitivity, 0.25f, 4.0f);
+                mIsScalingImage = true;
+            } else { // MMB pan
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
 
-            Vec2f translate(io.MouseDelta.x, -io.MouseDelta.y);
+                Vec2f translate(io.MouseDelta.x, -io.MouseDelta.y);
 
-            if (!useColumnView) {
-                mView.translate(translate);
-            } else if (io.KeyAlt) {
-                static Vec2f residualTranslate = Vec2f(0.0f);
-                translate += residualTranslate;
-                
-                Vec2f roundedTranslate = glm::round(translate / mImageScale);
-                int columnIdx = static_cast<int>(io.MousePos.x > io.DisplaySize.x * mViewSplitPos);
-                mColumnViews[columnIdx].translate(roundedTranslate, true);
-                residualTranslate = translate - roundedTranslate * mImageScale;
-            } else {
-                mColumnViews[0].translate(translate);
-                mColumnViews[1].translate(translate);
+                if (!useColumnView) {
+                    mView.translate(translate);
+                } else if (io.KeyAlt) {
+                    static Vec2f residualTranslate = Vec2f(0.0f);
+                    translate += residualTranslate;
+                    
+                    Vec2f roundedTranslate = glm::round(translate / mImageScale);
+                    int columnIdx = static_cast<int>(io.MousePos.x > io.DisplaySize.x * mViewSplitPos);
+                    mColumnViews[columnIdx].translate(roundedTranslate, true);
+                    residualTranslate = translate - roundedTranslate * mImageScale;
+                } else {
+                    mColumnViews[0].translate(translate);
+                    mColumnViews[1].translate(translate);
+                }
+
+                return;
             }
-
-            return;
         }
     }
 
-    bool mouseAtRightColumn = false;
-    auto fetchScalePivot = [](const ImGuiIO& io, bool useColumnView, float viewSplitPos, bool& mouseAtRightColumn) {
-        Vec2f scalePivot(io.MousePos.x, io.DisplaySize.y - io.MousePos.y);
-        if (useColumnView) {
-            float leftColumnWidth = io.DisplaySize.x * viewSplitPos;
-            if (scalePivot.x > leftColumnWidth) {
-                scalePivot.x -= leftColumnWidth;
-                mouseAtRightColumn = true;
-            }
-        }
-
-        scalePivot = glm::round(scalePivot + Vec2f(0.5f)) - Vec2f(0.5f);
-        return scalePivot;
-    };
-
-    // Zoom in/out from mouse scroll.
+    // Zoom in/out from mouse scroll. Use sign(io.MouseWheel) only so Windows
+    // "lines to scroll" (|wheel| > 1) does not apply multiple doublings at once;
+    // use a modest factor per tick instead of 2^|wheel|.
+    static constexpr float kScrollZoomFactor = 1.12f;
     if (onFocus && io.MouseWheel != 0.0f) {
         scalePivot = fetchScalePivot(io, useColumnView, mViewSplitPos, mouseAtRightColumn);
 
-        if (mImageScale == 2) {
-            if (io.MouseWheel >= 0.0f) {
-                mImageScale += io.MouseWheel;
-            } else {
-                mImageScale /= 1 << (int)(-io.MouseWheel);
-            }
-        } else if (mImageScale > 2) {
-            mImageScale *= io.MouseWheel > 0.0f ? 1.414f : 0.707f;
+        if (io.MouseWheel > 0.0f) {
+            mImageScale *= kScrollZoomFactor;
         } else {
-            if (io.MouseWheel >= 0.0f) {
-                mImageScale *= 1 << (int)(io.MouseWheel);
-            } else {
-                mImageScale /= 1 << (int)(-io.MouseWheel);
-            }
+            mImageScale /= kScrollZoomFactor;
         }
     }
 
@@ -1666,8 +1668,8 @@ void    App::initHomeWindow(const char* name)
                 ImGui::Text("Pixel Sniper");
                 ImGui::NextColumn();
 
-                ImGui::Text("Drag Left Mouse Button");
-                ImGui::Text("Drag Left Mouse Button + Alt");
+                ImGui::Text("Drag Middle Mouse Button");
+                ImGui::Text("Drag Middle Mouse Button + Alt");
                 ImGui::Text("Mouse Scroll or\nDrag Left + Right Mouse Buttons Vertically");
                 ImGui::Text("+/-");
                 ImGui::Text("/ or F");

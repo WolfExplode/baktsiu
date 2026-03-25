@@ -1,0 +1,10 @@
+^C:\USERS\WXP\DOCUMENTS\GITHUB\BAKTSIU\BUILD\CMAKEFILES\FBFFAC63DCECF968F5FC98E00262222F\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/WXP/Documents/GitHub/baktsiu -BC:/Users/WXP/Documents/GitHub/baktsiu/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/WXP/Documents/GitHub/baktsiu/build/baktsiu.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

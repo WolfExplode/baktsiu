@@ -12,7 +12,7 @@ When comparing render results from different anti-aliasing or importance samplin
 
 ![Pixel Inspection](images/pixel_inspection.jpg)
 
-* Pan View: drag left mouse button
+* Pan View: drag middle mouse button
 * Zoom In/Out: <kbd>+</kbd>/<kbd>-</kbd> or scroll mouse wheel
 * Continuous Zooming: drag left and right mouse buttons vertically
 * Zoom to Actual Size: <kbd>F</kbd>
@@ -35,7 +35,7 @@ Press <kbd>C</kbd> or <i class="fas fa-columns"></i> button to toggle side-by-si
 
 The corresponding pixels would be highlighted in green border in close-up view. If there is no highlighted border shown in another view, please move the splitter to make more space and pan the view to the region of interests.
 
-To apply local translation to current column view, just press <kbd>Alt</kbd> and drag left mouse button. If you want to synchronize local translation of both views, press <kbd>Alt+C</kbd>.
+To apply local translation to current column view, just press <kbd>Alt</kbd> and drag middle mouse button. If you want to synchronize local translation of both views, press <kbd>Alt+C</kbd>.
 
 ## Image Layers <i class="fas fa-layer-group"></i>
 
@@ -100,8 +100,8 @@ Numerical [approximation](https://github.com/shihchinw/numex/blob/master/noteboo
 | Close Selected Image | <kbd>Backspace</kbd> or <kbd>Del</kbd> |
 | Close All Images | <kbd>Ctrl+Shift+W</kbd> |
 | **Pixel Navigation** |
-| Pan View | Drag Left Mouse Button |
-| Offset Column View | Drag Left Mouse Button + <kbd>Alt</kbd> |
+| Pan View | Drag Middle Mouse Button |
+| Offset Column View | Drag Middle Mouse Button + <kbd>Alt</kbd> |
 | Zoom In/Out | Scroll Mouse or<br>Drag Left + Right Mouse Buttons Vertically |
 | Zoom In/Out in Power-of-Two | <kbd>+</kbd> / <kbd>-</kbd> |
 | Zoom to Actual Size | <kbd>/</kbd> or <kbd>F</kbd> |

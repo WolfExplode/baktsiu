@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build/ext/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build/ext/glfw/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build/ext/glfw/src/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build/ext/spdlog/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build/src/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
