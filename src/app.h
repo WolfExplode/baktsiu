@@ -219,6 +219,10 @@ private:
 
     void    exitVideoMode();
 
+    int     addVideoPath(const std::string& filepath);
+
+    void    openVideosFromSelection();
+
     void    initVideoTransportBar(const ImGuiIO& io);
 
     void    tickAndUploadVideoFrame(float deltaTime);
@@ -236,6 +240,8 @@ private:
     void    clampVideoCompositionT();
 
     void    syncVideoDecodersToCompositionT();
+
+    void    swapVideoSides();
 
     void    recreateVideoTextureB();
 
@@ -316,11 +322,20 @@ private:
     double      mVideoScrubValue = 0.0;
     std::unique_ptr<MFVideoReader> mVideoReader;
     std::unique_ptr<MFVideoReader> mVideoReaderB;
+    std::vector<std::string> mVideoPaths;
+    int         mVideoIndexL = -1;
+    int         mVideoIndexR = -1;
+    std::string mVideoPathL;
+    std::string mVideoPathR;
     GLuint      mVideoTexture = 0;
     GLuint      mVideoTextureB = 0;
     double      mVideoCompositionT = 0.0;
     double      mVideoStartL = 0.0;
     double      mVideoStartR = 0.0;
+    // Presentation-only left/right swap for instant switching while playing.
+    // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
+    // remain in their original slots (mVideoReader/mVideoReaderB).
+    bool        mVideoSwapPresentationLR = false;
     Shader      mVideoBlitShader;
     bool        mVideoShaderReady = false;
 
