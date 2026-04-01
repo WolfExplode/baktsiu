@@ -2697,8 +2697,17 @@ void App::renderVideoBlit(const ImGuiIO& io)
     mVideoBlitShader.bind();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, mVideoTexture);
+    const bool cmp = videoCompareActive();
+    const float transportBarH = cmp ? 62.0f : 36.0f;
+    const float contentH =
+        io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
+    const Vec2f contentOrigin(0.0f, mToolbarHeight);
+    const Vec2f contentSize(io.DisplaySize.x, std::max(1.0f, contentH));
+
     mVideoBlitShader.setUniform("uWindowSize", Vec2f(io.DisplaySize.x, io.DisplaySize.y));
-    if (videoCompareActive() && mVideoTextureB != 0) {
+    mVideoBlitShader.setUniform("uContentOrigin", contentOrigin);
+    mVideoBlitShader.setUniform("uContentSize", contentSize);
+    if (cmp && mVideoTextureB != 0) {
         mVideoBlitShader.setUniform("uCompareMode", 1);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, mVideoTextureB);

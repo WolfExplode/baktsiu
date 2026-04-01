@@ -136,6 +136,11 @@ bool readVideoOutputInfo(IMFSourceReader* reader, int& outW, int& outH, int& str
     if (stride < minStride) {
         stride = minStride;
     }
+    // NV12/YUV: decoders pad row stride to a multiple of 16 (e.g. 852-wide → 864). MF_MT_DEFAULT_STRIDE
+    // is often missing or equals picture width — using width as stride causes diagonal tearing.
+    if (!rgb32 && stride == outW && (outW & 15) != 0) {
+        stride = ((outW + 15) / 16) * 16;
+    }
     strideBytes = stride;
 
     UINT32 rateNum = 0;
@@ -253,6 +258,80 @@ inline uint8_t clampByte(int v)
     return static_cast<uint8_t>(v);
 }
 
+int resolveRgb32StrideFromBuffer(DWORD curLen, int w, int h, int typeStride)
+{
+    const int minS = w * 4;
+    if (h <= 0 || minS <= 0) {
+        return typeStride;
+    }
+    const DWORD dh = static_cast<DWORD>(h);
+    if (curLen < dh * static_cast<DWORD>(minS)) {
+        return typeStride;
+    }
+    if (curLen % dh != 0) {
+        return typeStride;
+    }
+    const int cand = static_cast<int>(curLen / dh);
+    if (cand >= minS && cand < 0x400000) {
+        return cand;
+    }
+    return typeStride;
+}
+
+int resolveNv12StrideFromBuffer(DWORD curLen, int w, int h, int typeStride)
+{
+    if (h <= 0 || w <= 0) {
+        return typeStride;
+    }
+    const DWORD denom = static_cast<DWORD>(h) + (static_cast<DWORD>(h) + 1u) / 2u;
+    if (denom == 0 || curLen < denom) {
+        return typeStride;
+    }
+    if (curLen % denom != 0) {
+        return typeStride;
+    }
+    const int cand = static_cast<int>(curLen / denom);
+    if (cand >= w && cand < 0x400000) {
+        return cand;
+    }
+    return typeStride;
+}
+
+// NV12 size = stride * (lumaRows + chromaRows), chromaRows = (lumaRows+1)/2. Decoders often pad luma height to
+// a multiple of 16 (e.g. 260 → 272) while MF_MT_FRAME_SIZE still reports 260 — UV plane offset must use padded rows.
+int findNv12LumaHeightForRowCount(DWORD totalRowBlocks, int hPic)
+{
+    for (int H = hPic; H <= hPic + 192; ++H) {
+        const DWORD rows = static_cast<DWORD>(H) + (static_cast<DWORD>(H) + 1u) / 2u;
+        if (rows == totalRowBlocks) {
+            return H;
+        }
+    }
+    return -1;
+}
+
+// Smallest luma height >= hPic that explains curLen; sets stride and buffer luma height.
+bool pickNv12BufferLayout(DWORD curLen, int w, int hPic, int typeStride, int& outStride, int& outBufH)
+{
+    for (int H = hPic; H <= hPic + 192; ++H) {
+        const DWORD denom = static_cast<DWORD>(H) + (static_cast<DWORD>(H) + 1u) / 2u;
+        if (denom == 0 || curLen % denom != 0) {
+            continue;
+        }
+        const int stride = static_cast<int>(curLen / denom);
+        if (stride < w || stride >= 0x400000) {
+            continue;
+        }
+        if (static_cast<DWORD>(stride) * denom != curLen) {
+            continue;
+        }
+        outStride = stride;
+        outBufH = H;
+        return true;
+    }
+    return false;
+}
+
 void nv12ToRgba(const uint8_t* yPlane, const uint8_t* uvPlane, int yStride, int width, int height, uint8_t* dstRgba)
 {
     for (int y = 0; y < height; ++y) {
@@ -301,13 +380,54 @@ struct MFVideoReaderDecodeDetail
             return false;
         }
 
-        const size_t stride = static_cast<size_t>(r.m_strideBytes);
-        const size_t h = static_cast<size_t>(r.m_height);
+        int strideBytes = r.m_strideBytes;
+        const int minPitch = r.m_outputRgb32 ? (r.m_width * 4) : r.m_width;
+
+        bool have2dStride = false;
+        LONG pitch2d = 0;
+        IMF2DBuffer* p2d = nullptr;
+        if (SUCCEEDED(buf->QueryInterface(IID_IMF2DBuffer, reinterpret_cast<void**>(&p2d))) && p2d) {
+            BYTE* scan0 = nullptr;
+            LONG pitch = 0;
+            if (SUCCEEDED(p2d->GetScanline0AndPitch(&scan0, &pitch)) && pitch >= minPitch && pitch < 0x400000) {
+                pitch2d = pitch;
+                have2dStride = true;
+            }
+            p2d->Release();
+        }
+
+        int nv12BufH = r.m_height;
+        if (r.m_outputRgb32) {
+            if (have2dStride) {
+                strideBytes = static_cast<int>(pitch2d);
+            } else {
+                strideBytes = resolveRgb32StrideFromBuffer(curLen, r.m_width, r.m_height, r.m_strideBytes);
+            }
+        } else {
+            if (!pickNv12BufferLayout(curLen, r.m_width, r.m_height, r.m_strideBytes, strideBytes, nv12BufH)) {
+                if (have2dStride) {
+                    strideBytes = static_cast<int>(pitch2d);
+                    if (curLen % static_cast<DWORD>(strideBytes) == 0) {
+                        const DWORD totalRows = curLen / static_cast<DWORD>(strideBytes);
+                        const int found = findNv12LumaHeightForRowCount(totalRows, r.m_height);
+                        if (found >= 0) {
+                            nv12BufH = found;
+                        }
+                    }
+                } else {
+                    strideBytes = resolveNv12StrideFromBuffer(curLen, r.m_width, r.m_height, r.m_strideBytes);
+                }
+            }
+        }
+        r.m_strideBytes = strideBytes;
+
+        const size_t stride = static_cast<size_t>(strideBytes);
+        const size_t picH = static_cast<size_t>(r.m_height);
         const size_t w = static_cast<size_t>(r.m_width);
 
         if (r.m_outputRgb32) {
             const size_t rowNeed = stride;
-            const size_t lastRowEnd = (h > 0) ? ((h - 1u) * stride + w * 4u) : 0u;
+            const size_t lastRowEnd = (picH > 0) ? ((picH - 1u) * stride + w * 4u) : 0u;
             if (curLen < lastRowEnd || rowNeed < w * 4u) {
                 LOGW("RGB32 buffer too small or stride invalid: curLen={}, need>={}, stride={}, {}x{}",
                     static_cast<unsigned>(curLen), static_cast<unsigned>(lastRowEnd), r.m_strideBytes, r.m_width,
@@ -327,14 +447,15 @@ struct MFVideoReaderDecodeDetail
                 }
             }
         } else {
-            const size_t yPlaneBytes = stride * h;
-            const size_t uvRows = (h + 1u) / 2u;
+            const size_t bufH = static_cast<size_t>(nv12BufH);
+            const size_t yPlaneBytes = stride * bufH;
+            const size_t uvRows = (bufH + 1u) / 2u;
             const size_t uvPlaneBytes = stride * uvRows;
             const size_t nv12Need = yPlaneBytes + uvPlaneBytes;
             if (curLen < nv12Need) {
-                LOGW("NV12 buffer too small: curLen={}, need>={}, stride={}, {}x{}",
-                    static_cast<unsigned>(curLen), static_cast<unsigned>(nv12Need), r.m_strideBytes, r.m_width,
-                    r.m_height);
+                LOGW("NV12 buffer too small: curLen={}, need>={}, stride={}, bufH={} pic={}x{}",
+                    static_cast<unsigned>(curLen), static_cast<unsigned>(nv12Need), r.m_strideBytes,
+                    nv12BufH, r.m_width, r.m_height);
                 buf->Unlock();
                 buf->Release();
                 return false;
