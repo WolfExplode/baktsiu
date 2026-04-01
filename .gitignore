@@ -1,5 +1,12 @@
 msvc/build
 
+# CMake out-of-source build trees (CMakeCache, generated .vcxproj, MSBuild *.tlog, etc.)
+build/
+build-novideo/
+
+# MSBuild trace logs (incremental compile state; not source)
+*.tlog
+
 # User-specific files
 *.suo
 *.user

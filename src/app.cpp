@@ -2794,6 +2794,8 @@ void App::openVideosFromSelection()
 
     // If the selected media are already open, don't reopen/recreate textures/reset offsets.
     // Just resync decoding to the current composition time.
+    // Do not clear mVideoSwapPresentationLR here — storage indices match decoder paths but the
+    // user may still want L/R flipped on screen.
     if (mVideoMode && mVideoReader && mVideoReader->isOpen()
         && mVideoPathL == pathL
         && ((idxR < 0 && mVideoPathR.empty()) || (idxR >= 0 && mVideoPathR == pathR))) {
@@ -2801,6 +2803,42 @@ void App::openVideosFromSelection()
         if (idxR < 0 || videoCompareActive()) {
             syncVideoDecodersToCompositionT();
             return;
+        }
+    }
+
+    // Property-window clicks write mVideoIndexL/R in "storage" order, while L/R *labels* follow
+    // presentation (mVideoSwapPresentationLR). Infer which path the user wants on screen-left vs
+    // screen-right; if that pair is exactly the two files already open, only adjust presentation +
+    // canonical list indices — no reopen.
+    if (mVideoMode && videoCompareActive() && idxR >= 0
+        && mVideoReader && mVideoReader->isOpen()
+        && mVideoReaderB && mVideoReaderB->isOpen()) {
+        const int pL = mVideoSwapPresentationLR ? mVideoIndexR : mVideoIndexL;
+        const int pR = mVideoSwapPresentationLR ? mVideoIndexL : mVideoIndexR;
+        if (pL >= 0 && pL < n && pR >= 0 && pR < n && pL != pR) {
+            const std::string& wantLeft = mVideoPaths[pL];
+            const std::string& wantRight = mVideoPaths[pR];
+            const std::string& openA = mVideoPathL;
+            const std::string& openB = mVideoPathR;
+            const bool samePair =
+                (wantLeft == openA && wantRight == openB) || (wantLeft == openB && wantRight == openA);
+            if (samePair) {
+                // Keep list indices in sync with what the user actually picked (pL / pR), not
+                // findIdx(openA) which always returns the first matching row (wrong if the same path
+                // appears twice). Decoder slot 0 is always openA, slot 1 is openB — map rows to slots:
+                // natural screen L=A,R=B => storage (pL,pR); swapped L=B,R=A => storage (pR,pL).
+                if (wantLeft == openA && wantRight == openB) {
+                    mVideoIndexL = pL;
+                    mVideoIndexR = pR;
+                    mVideoSwapPresentationLR = false;
+                } else {
+                    mVideoIndexL = pR;
+                    mVideoIndexR = pL;
+                    mVideoSwapPresentationLR = true;
+                }
+                syncVideoDecodersToCompositionT();
+                return;
+            }
         }
     }
 
