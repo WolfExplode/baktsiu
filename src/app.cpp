@@ -673,23 +673,32 @@ void App::run(CompositeFlags initFlags)
         onKeyPressed(io);
         Image* topImage = getTopImage();
         Vec2f imageSize = topImage ? topImage->size() : Vec2f(1.0f);
+        Vec2f refImageSize = imageSize;
 
         const bool useColumnView = inSideBySideMode();
         if (!videoActive) {
+            const bool enableCompareView = inCompareMode();
+            if (enableCompareView && mCmpImageIndex >= 0 && topImage) {
+                Image* cmpImage = mImageList[mCmpImageIndex].get();
+                if (cmpImage) {
+                    const Vec2f cmpSize = cmpImage->size();
+                    refImageSize.x = (std::max)(refImageSize.x, cmpSize.x);
+                    refImageSize.y = (std::max)(refImageSize.y, cmpSize.y);
+                }
+            }
+
             if (useColumnView) {
                 const float leftColumnWidth = io.DisplaySize.x * mViewSplitPos;
                 mColumnViews[0].resize(Vec2f(leftColumnWidth, io.DisplaySize.y));
                 mColumnViews[1].resize(Vec2f(io.DisplaySize.x - leftColumnWidth, io.DisplaySize.y));
-                mColumnViews[0].setImageSize(imageSize);
-                mColumnViews[1].setImageSize(imageSize);
+                mColumnViews[0].setImageSize(enableCompareView ? refImageSize : imageSize);
+                mColumnViews[1].setImageSize(enableCompareView ? refImageSize : imageSize);
             } else {
                 mView.resize(io.DisplaySize);
-                mView.setImageSize(imageSize);
+                mView.setImageSize(enableCompareView ? refImageSize : imageSize);
             }
 
             updateImageTransform(io, useColumnView);
-
-            const bool enableCompareView = inCompareMode();
             if (shouldShowSplitter() && mShowImageNameOverlay) {
                 showImageNameOverlays();
             }
@@ -753,16 +762,29 @@ void App::run(CompositeFlags initFlags)
             const float imageScale = topView.getImageScale();
             const bool forceNearestFilter = imageScale > 5.0f;
 
+            Vec2f tex1Present = topImage ? topImage->size() : Vec2f(1.0f);
+            Vec2f tex2Present(1.0f);
+            Image* cmpForPresent = (enableCompareView && mCmpImageIndex >= 0)
+                ? mImageList[mCmpImageIndex].get()
+                : nullptr;
+            if (cmpForPresent) {
+                tex2Present = cmpForPresent->size();
+            }
+            Vec2f refForPresent = (enableCompareView && cmpForPresent) ? refImageSize : tex1Present;
+
             if (topImage) {
                 mRenderTextures[mTopImageRenderTexIdx].bindAsInput(mUseLinearFilter && !forceNearestFilter);
 
-                Vec2f imageSizeDraw = topImage->size();
-                mPresentShader.setUniform("uImageSize", imageSizeDraw * imageScale);
+                mPresentShader.setUniform("uImageSize", refForPresent * imageScale);
                 mPresentShader.setUniform("uOffset", topView.getImageOffset());
                 mPresentShader.setUniform("uImage1", 0);
             } else {
                 mPresentShader.setUniform("uImageSize", Vec2f(0.0f));
             }
+
+            mPresentShader.setUniform("uRefImageSize", refForPresent);
+            mPresentShader.setUniform("uTex1Size", tex1Present);
+            mPresentShader.setUniform("uTex2Size", tex2Present);
 
             mPresentShader.setUniform("uEnablePixelHighlight", !mIsMovingSplitter && !mIsScalingImage);
             mPresentShader.setUniform("uCursorPos", Vec2f(io.MousePos.x, io.DisplaySize.y - io.MousePos.y) + Vec2f(0.5f));
@@ -1761,7 +1783,34 @@ void App::initFooter()
 
     ImGui::Text("%s", mImageScaleInfo);
 
-    if (mTopImageIndex >= 0) {
+    const bool compareUi = inCompareMode() && mTopImageIndex >= 0 && mCmpImageIndex >= 0;
+
+    if (compareUi) {
+        const Image* leftIm = mImageList[mTopImageIndex].get();
+        const Image* rightIm = mImageList[mCmpImageIndex].get();
+        const Vec2f leftSz = leftIm->size();
+        const Vec2f rightSz = rightIm->size();
+
+        ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
+        ImGui::Text("L | %.0f x %.0f", leftSz.x, leftSz.y);
+        Vec2f lcoords;
+        if (getCompareSideImagePixelAtMouse(Vec2f(g.IO.MousePos.x, g.IO.MousePos.y), 0, lcoords)) {
+            ImGui::SameLine();
+            ImGui::Text("(%.0f, %.0f)", lcoords.x, leftSz.y - lcoords.y - 1.0f);
+        }
+
+        char rbuf[128];
+        Vec2f rcoords;
+        if (getCompareSideImagePixelAtMouse(Vec2f(g.IO.MousePos.x, g.IO.MousePos.y), 1, rcoords)) {
+            sprintf_s(rbuf, "R | %.0f x %.0f (%.0f, %.0f)", rightSz.x, rightSz.y, rcoords.x, rightSz.y - rcoords.y - 1.0f);
+        } else {
+            sprintf_s(rbuf, "R | %.0f x %.0f", rightSz.x, rightSz.y);
+        }
+        const float rtextW = ImGui::CalcTextSize(rbuf).x;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - rtextW);
+        ImGui::TextUnformatted(rbuf);
+    } else if (mTopImageIndex >= 0) {
         const Vec2f& imageSize = mImageList[mTopImageIndex]->size();
         ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
         ImGui::Text("| %.0f x %.0f", imageSize.x, imageSize.y);
@@ -2393,6 +2442,76 @@ bool App::getImageCoordinates(Vec2f viewportCoords, Vec2f& outImageCoords) const
     outImageCoords = glm::floor(outImageCoords);
 
     return !isOutsideImage;
+}
+
+bool App::getCompareSideImagePixelAtMouse(Vec2f imguiMousePos, int side, Vec2f& outImagePx) const
+{
+    if (!inCompareMode() || mCmpImageIndex < 0 || mTopImageIndex < 0) {
+        return false;
+    }
+    if (side != 0 && side != 1) {
+        return false;
+    }
+
+    auto& io = ImGui::GetIO();
+    Vec2f viewportCoords(imguiMousePos.x, io.DisplaySize.y - imguiMousePos.y);
+    const float splitPx = glm::round(io.DisplaySize.x * mViewSplitPos);
+
+    bool outsideRef = false;
+    Vec2f refPx;
+    if (!inSideBySideMode()) {
+        if (side == 0 && viewportCoords.x >= splitPx) {
+            return false;
+        }
+        if (side == 1 && viewportCoords.x < splitPx) {
+            return false;
+        }
+        refPx = mView.getImageCoords(viewportCoords, &outsideRef);
+    } else {
+        if (side == 0) {
+            if (viewportCoords.x > splitPx) {
+                return false;
+            }
+            refPx = mColumnViews[0].getImageCoords(viewportCoords, &outsideRef);
+        } else {
+            if (viewportCoords.x <= splitPx) {
+                return false;
+            }
+            viewportCoords.x -= splitPx;
+            refPx = mColumnViews[1].getImageCoords(viewportCoords, &outsideRef);
+        }
+    }
+
+    if (outsideRef) {
+        return false;
+    }
+
+    const Image* topIm = mImageList[mTopImageIndex].get();
+    const Image* cmpIm = mImageList[mCmpImageIndex].get();
+    if (!topIm || !cmpIm) {
+        return false;
+    }
+
+    const Vec2f topSz = topIm->size();
+    const Vec2f cmpSz = cmpIm->size();
+    const Vec2f refSz((std::max)(topSz.x, cmpSz.x), (std::max)(topSz.y, cmpSz.y));
+
+    const Image* sideIm = (side == 0) ? topIm : cmpIm;
+    const Vec2f actual = sideIm->size();
+    const float sc = (std::min)(refSz.x / (std::max)(actual.x, 1e-6f), refSz.y / (std::max)(actual.y, 1e-6f));
+    const Vec2f disp(actual.x * sc, actual.y * sc);
+    const Vec2f ox = (refSz - disp) * 0.5f;
+    const Vec2f uv((refPx.x - ox.x) / (std::max)(disp.x, 1e-6f), (refPx.y - ox.y) / (std::max)(disp.y, 1e-6f));
+
+    if (uv.x < -1e-4f || uv.y < -1e-4f || uv.x > 1.0f + 1e-4f || uv.y > 1.0f + 1e-4f) {
+        return false;
+    }
+
+    outImagePx = glm::floor(uv * actual);
+    outImagePx.x = glm::clamp(outImagePx.x, 0.0f, glm::max(actual.x - 1.0f, 0.0f));
+    outImagePx.y = glm::clamp(outImagePx.y, 0.0f, glm::max(actual.y - 1.0f, 0.0f));
+
+    return true;
 }
 
 float App::getPropWindowWidth() const

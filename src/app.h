@@ -180,6 +180,9 @@ private:
     // Return pixel coordinates from mouse position.
     bool    getImageCoordinates(Vec2f viewportCoords, Vec2f& outImageCoords) const;
 
+    // Compare: side 0 = left layer (uImage1), 1 = right (uImage2). Uses same ref/contain as present.frag.
+    bool    getCompareSideImagePixelAtMouse(Vec2f imguiMousePos, int side, Vec2f& outImagePx) const;
+
     void    appendAction(Action&& action);
 
     void    undoAction();
