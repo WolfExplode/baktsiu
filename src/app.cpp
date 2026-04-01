@@ -2698,7 +2698,7 @@ void App::renderVideoBlit(const ImGuiIO& io)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, mVideoTexture);
     const bool cmp = videoCompareActive();
-    const float transportBarH = cmp ? 62.0f : 36.0f;
+    const float transportBarH = cmp ? 80.0f : 36.0f;
     const float contentH =
         io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
     const Vec2f contentOrigin(0.0f, mToolbarHeight);
@@ -2742,7 +2742,7 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         return;
     }
     const bool cmp = videoCompareActive();
-    const float barH = cmp ? 62.0f : 36.0f;
+    const float barH = cmp ? 80.0f : 36.0f;
     ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -2764,6 +2764,9 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     ImGui::SameLine();
 
     if (cmp) {
+        const ImVec4 tintL(0.25f, 0.80f, 0.75f, 1.0f);  // teal
+        const ImVec4 tintR(0.95f, 0.55f, 0.20f, 1.0f);  // orange
+
         double tMin = 0.0;
         double tMax = 1.0;
         recomputeVideoScrubBounds(tMin, tMax);
@@ -2772,6 +2775,39 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         ImGui::PushID("videoscrubcmp");
         const bool valueChanged =
             ImGui::SliderScalar("##t", ImGuiDataType_Double, &mVideoScrubValue, &tMin, &tMax, "");
+
+        // Overlay each video's bounds onto the scrub bar so their relative alignment is visible.
+        // In composition time: media spans [mVideoStartX, mVideoStartX + durationX].
+        if (tMax > tMin) {
+            const ImVec2 rmin = ImGui::GetItemRectMin();
+            const ImVec2 rmax = ImGui::GetItemRectMax();
+            const float padY = 2.0f;
+            const float y0 = rmin.y + padY;
+            const float y1 = rmax.y - padY;
+            auto drawRange = [&](double a, double b, const ImVec4& tint) {
+                const double lo = (std::min)(a, b);
+                const double hi = (std::max)(a, b);
+                const double c0 = (std::max)(lo, tMin);
+                const double c1 = (std::min)(hi, tMax);
+                if (c1 <= c0) {
+                    return;
+                }
+                const float u0 = static_cast<float>((c0 - tMin) / (tMax - tMin));
+                const float u1 = static_cast<float>((c1 - tMin) / (tMax - tMin));
+                const float x0 = rmin.x + (rmax.x - rmin.x) * glm::clamp(u0, 0.0f, 1.0f);
+                const float x1 = rmin.x + (rmax.x - rmin.x) * glm::clamp(u1, 0.0f, 1.0f);
+                const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(tint.x, tint.y, tint.z, 0.22f));
+                const ImU32 edge = ImGui::ColorConvertFloat4ToU32(ImVec4(tint.x, tint.y, tint.z, 0.65f));
+                ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), fill, 2.0f);
+                ImGui::GetWindowDrawList()->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), edge, 2.0f);
+            };
+
+            const double dL = (mVideoReader) ? (std::max)(0.0, mVideoReader->durationSec()) : 0.0;
+            const double dR = (mVideoReaderB) ? (std::max)(0.0, mVideoReaderB->durationSec()) : 0.0;
+            drawRange(mVideoStartL, mVideoStartL + dL, tintL);
+            drawRange(mVideoStartR, mVideoStartR + dR, tintR);
+        }
+
         const bool itemActive = ImGui::IsItemActive();
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
@@ -2796,14 +2832,110 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         ImGui::Text("T %s / %s", tBuf, maxBuf);
 
         ImGui::TextUnformatted("Offsets (composition time at media 0):");
+
+        static char sOffBufL[64] = "";
+        static char sOffBufR[64] = "";
+
+        auto offsetControl = [&](const char* label, double& v, double stepSec, const ImVec4& tint, char* buf,
+                                 size_t bufSize) -> bool {
+            bool changed = false;
+            ImGui::PushID(label);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(tint, "%s", label);
+            ImGui::SameLine();
+
+            // Tint controls by side (button + input background).
+            const ImVec4 btn = ImVec4(tint.x * 0.85f, tint.y * 0.85f, tint.z * 0.85f, 1.0f);
+            const ImVec4 btnHover = ImVec4(tint.x, tint.y, tint.z, 1.0f);
+            const ImVec4 btnActive = ImVec4(tint.x * 1.05f, tint.y * 1.05f, tint.z * 1.05f, 1.0f);
+            const ImVec4 frame = ImVec4(tint.x * 0.20f, tint.y * 0.20f, tint.z * 0.20f, 0.85f);
+            ImGui::PushStyleColor(ImGuiCol_Button, btn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, btnActive);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, frame);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frame);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frame);
+
+            auto stripUnitsInPlace = [](char* s) {
+                if (!s) {
+                    return;
+                }
+                // Truncate at first non-number-ish char (keeps sign, decimal, exponent).
+                for (char* p = s; *p; ++p) {
+                    const char c = *p;
+                    const bool ok = (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
+                    if (!ok) {
+                        *p = '\0';
+                        break;
+                    }
+                }
+            };
+
+            if (ImGui::SmallButton("<")) {
+                v -= stepSec;
+                changed = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(92.0f);
+            {
+                const ImGuiID vId = ImGui::GetID("##v");
+                const bool wasActive = (ImGui::GetActiveID() == vId);
+                if (!wasActive) {
+                    std::snprintf(buf, bufSize, "%.3f", v);
+                }
+
+                ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
+                const bool enter = ImGui::InputText("##v", buf, bufSize, flags);
+                const bool nowActive = ImGui::IsItemActive();
+                const bool activated = ImGui::IsItemActivated();
+                const bool deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+
+                if (activated) {
+                    stripUnitsInPlace(buf);
+                }
+
+                if (enter || deactivatedAfterEdit) {
+                    char* endp = nullptr;
+                    const double parsed = std::strtod(buf, &endp);
+                    if (endp != buf) {
+                        v = parsed;
+                        changed = true;
+                    }
+                }
+
+                if (!nowActive) {
+                    std::snprintf(buf, bufSize, "%.3f", v);
+
+                    // Visual-only unit suffix, not part of the input buffer.
+                    const ImVec2 rmin = ImGui::GetItemRectMin();
+                    const ImVec2 rmax = ImGui::GetItemRectMax();
+                    const char* unit = "s";
+                    const ImVec2 unitSz = ImGui::CalcTextSize(unit);
+                    const float padX = 6.0f;
+                    const float x = rmax.x - unitSz.x - padX;
+                    const float y = rmin.y + (rmax.y - rmin.y - unitSz.y) * 0.5f;
+                    const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::GetWindowDrawList()->AddText(ImVec2(x, y), col, unit);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(">")) {
+                v += stepSec;
+                changed = true;
+            }
+
+            ImGui::PopStyleColor(6);
+            ImGui::PopID();
+            return changed;
+        };
+
+        const double stepL = (mVideoReader && mVideoReader->frameDurationSec() > 0.0) ? mVideoReader->frameDurationSec() : 0.05;
+        const double stepR =
+            (mVideoReaderB && mVideoReaderB->frameDurationSec() > 0.0) ? mVideoReaderB->frameDurationSec() : 0.05;
+        const bool changedL = offsetControl("L", mVideoStartL, stepL, tintL, sOffBufL, sizeof sOffBufL);
         ImGui::SameLine();
-        if (ImGui::DragScalar("L##voffl", ImGuiDataType_Double, &mVideoStartL, 0.05f, nullptr, nullptr, "%.2f s")) {
-            clampVideoCompositionT();
-            syncVideoDecodersToCompositionT();
-            mVideoPlaying = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::DragScalar("R##voffr", ImGuiDataType_Double, &mVideoStartR, 0.05f, nullptr, nullptr, "%.2f s")) {
+        const bool changedR = offsetControl("R", mVideoStartR, stepR, tintR, sOffBufR, sizeof sOffBufR);
+        if (changedL || changedR) {
             clampVideoCompositionT();
             syncVideoDecodersToCompositionT();
             mVideoPlaying = false;
