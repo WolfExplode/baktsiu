@@ -59,7 +59,9 @@ int main(int argc, char** argv)
                     imagePaths.push_back(n);
                 }
             }
-            if (!videoPaths.empty()) {
+            if (videoPaths.size() >= 2) {
+                app.openVideoCompare(videoPaths[0], videoPaths[1]);
+            } else if (videoPaths.size() == 1) {
                 app.openVideoFile(videoPaths[0]);
             }
             if (!imagePaths.empty()) {

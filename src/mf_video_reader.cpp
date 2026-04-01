@@ -445,11 +445,14 @@ bool MFVideoReader::open(const std::string& utf8Path)
 void MFVideoReader::close()
 {
 #if defined(_WIN32) && defined(USE_VIDEO)
+    // Only balance mfStartupAddRef from a successful open(). Calling mfStartupRelease when
+    // m_reader is null would wrongly MFShutdown() while another MFVideoReader still exists
+    // (e.g. second reader's open() begins with close() on a default-constructed instance).
     if (m_reader) {
         static_cast<IMFSourceReader*>(m_reader)->Release();
         m_reader = nullptr;
+        mfStartupRelease();
     }
-    mfStartupRelease();
 #else
     m_reader = nullptr;
 #endif

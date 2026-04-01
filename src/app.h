@@ -116,6 +116,8 @@ public:
 
     void    openVideoFile(const std::string& filepath);
 
+    void    openVideoCompare(const std::string& leftPath, const std::string& rightPath);
+
     void    run(CompositeFlags initFlags = CompositeFlags::Top);
 
     void    release();
@@ -227,6 +229,18 @@ private:
 
     void    uploadVideoTexture();
 
+    bool    videoCompareActive() const;
+
+    void    recomputeVideoScrubBounds(double& outMin, double& outMax) const;
+
+    void    clampVideoCompositionT();
+
+    void    syncVideoDecodersToCompositionT();
+
+    void    recreateVideoTextureB();
+
+    void    uploadVideoTextureB();
+
     using ImageUPtr = std::unique_ptr<Image>;
 
     std::vector<ImageUPtr>      mImageList;
@@ -301,7 +315,12 @@ private:
     double      mVideoPlaybackTimeBank = 0.0;
     double      mVideoScrubValue = 0.0;
     std::unique_ptr<MFVideoReader> mVideoReader;
+    std::unique_ptr<MFVideoReader> mVideoReaderB;
     GLuint      mVideoTexture = 0;
+    GLuint      mVideoTextureB = 0;
+    double      mVideoCompositionT = 0.0;
+    double      mVideoStartL = 0.0;
+    double      mVideoStartR = 0.0;
     Shader      mVideoBlitShader;
     bool        mVideoShaderReady = false;
 
