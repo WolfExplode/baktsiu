@@ -13,6 +13,9 @@
     <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\mf_video_reader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\shader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -64,6 +67,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\image.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\mf_video_reader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\shader.h">

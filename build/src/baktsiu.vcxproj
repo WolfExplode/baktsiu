@@ -111,12 +111,12 @@
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Users\WXP\Documents\GitHub\baktsiu\ext;C:\Users\WXP\Documents\GitHub\baktsiu\ext\imgui;C:\Users\WXP\Documents\GitHub\baktsiu\ext\gl3w;C:\Users\WXP\Documents\GitHub\baktsiu\ext\stb;C:\Users\WXP\Documents\GitHub\baktsiu\build\src;C:\Users\WXP\Documents\GitHub\baktsiu\ext\glfw\include;C:\Users\WXP\Documents\GitHub\baktsiu\ext\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -128,7 +128,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>..\ext\glfw\src\Debug\glfw3.lib;..\ext\spdlog\Debug\spdlogd.lib;glu32.lib;OpenGL32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>..\ext\glfw\src\Debug\glfw3.lib;..\ext\spdlog\Debug\spdlogd.lib;glu32.lib;OpenGL32.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;strmiids.lib;ole32.lib;propsys.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -168,14 +168,14 @@
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Users\WXP\Documents\GitHub\baktsiu\ext;C:\Users\WXP\Documents\GitHub\baktsiu\ext\imgui;C:\Users\WXP\Documents\GitHub\baktsiu\ext\gl3w;C:\Users\WXP\Documents\GitHub\baktsiu\ext\stb;C:\Users\WXP\Documents\GitHub\baktsiu\build\src;C:\Users\WXP\Documents\GitHub\baktsiu\ext\glfw\include;C:\Users\WXP\Documents\GitHub\baktsiu\ext\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -187,7 +187,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>..\ext\glfw\src\Release\glfw3.lib;..\ext\spdlog\Release\spdlog.lib;glu32.lib;OpenGL32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>..\ext\glfw\src\Release\glfw3.lib;..\ext\spdlog\Release\spdlog.lib;glu32.lib;OpenGL32.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;strmiids.lib;ole32.lib;propsys.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -227,14 +227,14 @@
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Users\WXP\Documents\GitHub\baktsiu\ext;C:\Users\WXP\Documents\GitHub\baktsiu\ext\imgui;C:\Users\WXP\Documents\GitHub\baktsiu\ext\gl3w;C:\Users\WXP\Documents\GitHub\baktsiu\ext\stb;C:\Users\WXP\Documents\GitHub\baktsiu\build\src;C:\Users\WXP\Documents\GitHub\baktsiu\ext\glfw\include;C:\Users\WXP\Documents\GitHub\baktsiu\ext\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -246,7 +246,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>..\ext\glfw\src\MinSizeRel\glfw3.lib;..\ext\spdlog\MinSizeRel\spdlog.lib;glu32.lib;OpenGL32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>..\ext\glfw\src\MinSizeRel\glfw3.lib;..\ext\spdlog\MinSizeRel\spdlog.lib;glu32.lib;OpenGL32.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;strmiids.lib;ole32.lib;propsys.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -287,12 +287,12 @@
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION="0.2.1";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;USE_VIDEO;EMBED_SHADERS;_CRT_SECURE_NO_WARNINGS;VERSION=\"0.2.1\";SPDLOG_COMPILED_LIB;SPDLOG_NO_EXCEPTIONS;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Users\WXP\Documents\GitHub\baktsiu\ext;C:\Users\WXP\Documents\GitHub\baktsiu\ext\imgui;C:\Users\WXP\Documents\GitHub\baktsiu\ext\gl3w;C:\Users\WXP\Documents\GitHub\baktsiu\ext\stb;C:\Users\WXP\Documents\GitHub\baktsiu\build\src;C:\Users\WXP\Documents\GitHub\baktsiu\ext\glfw\include;C:\Users\WXP\Documents\GitHub\baktsiu\ext\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -304,7 +304,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>..\ext\glfw\src\RelWithDebInfo\glfw3.lib;..\ext\spdlog\RelWithDebInfo\spdlog.lib;glu32.lib;OpenGL32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>..\ext\glfw\src\RelWithDebInfo\glfw3.lib;..\ext\spdlog\RelWithDebInfo\spdlog.lib;glu32.lib;OpenGL32.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;strmiids.lib;ole32.lib;propsys.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -382,7 +382,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <CustomBuild Include="C:\Users\WXP\Documents\GitHub\baktsiu\build\CMakeFiles\9d7892982278dc17bd540c9263693767\shader_resources.h.rule">
       <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Running res2c to merge shader files</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
-Debug\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp
+Debug\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.vert
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -390,12 +390,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.vert;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\build\src\shader_resources.h</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Running res2c to merge shader files</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
-Release\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp
+Release\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.vert
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -403,12 +403,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.vert;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\build\src\shader_resources.h</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Running res2c to merge shader files</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
-MinSizeRel\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp
+MinSizeRel\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.vert
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -416,12 +416,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.vert;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\build\src\shader_resources.h</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Running res2c to merge shader files</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
-RelWithDebInfo\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp
+RelWithDebInfo\res2c.exe --shaders C:/Users/WXP/Documents/GitHub/baktsiu/shaders/color_grading.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/present.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/quad.vert C:/Users/WXP/Documents/GitHub/baktsiu/shaders/statistics.comp C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.frag C:/Users/WXP/Documents/GitHub/baktsiu/shaders/video_blit.vert
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -429,7 +429,7 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\shaders\color_grading.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\present.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\quad.vert;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\statistics.comp;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.frag;C:\Users\WXP\Documents\GitHub\baktsiu\shaders\video_blit.vert;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\WXP\Documents\GitHub\baktsiu\build\src\shader_resources.h</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
     </CustomBuild>
@@ -500,6 +500,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\image.cpp" />
     <ClInclude Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\image.h" />
     <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\main.cpp" />
+    <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\mf_video_reader.cpp" />
+    <ClInclude Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\mf_video_reader.h" />
     <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\shader.cpp" />
     <ClInclude Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\shader.h" />
     <ClCompile Include="C:\Users\WXP\Documents\GitHub\baktsiu\src\texture.cpp" />

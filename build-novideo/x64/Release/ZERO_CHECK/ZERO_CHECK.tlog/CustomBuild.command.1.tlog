@@ -1,0 +1,10 @@
+^C:\USERS\WXP\DOCUMENTS\GITHUB\BAKTSIU\BUILD-NOVIDEO\CMAKEFILES\71DCF3FD0944094742E3CBF6E71E8B8B\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/WXP/Documents/GitHub/baktsiu -BC:/Users/WXP/Documents/GitHub/baktsiu/build-novideo --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/baktsiu.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

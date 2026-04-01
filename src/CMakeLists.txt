@@ -13,6 +13,10 @@ if(USE_OPENEXR)
     add_definitions(-DUSE_OPENEXR)
 endif()
 
+if(WIN32 AND USE_VIDEO)
+    add_definitions(-DUSE_VIDEO)
+endif()
+
 # Run custom command to convert binary files into uint8_t arrays that could
 # be included in main application sources.
 # Glob up resource files
@@ -63,7 +67,12 @@ source_group("External Files\\gl3w"   FILES ${GL3W_SRC_FILES})
 source_group("External Files\\imgui"  FILES ${IMGUI_SRC_FILES})
 source_group("External Files\\docopt" FILES ${DOCOPT_SRC_FILES})
 
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB})
+set(VIDEO_LIBS "")
+if(WIN32 AND USE_VIDEO)
+    list(APPEND VIDEO_LIBS mfplat mfreadwrite mfuuid strmiids ole32 propsys)
+endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS})
 
 if(USE_OPENEXR AND WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE zlibstatic)

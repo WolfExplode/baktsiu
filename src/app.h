@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "image.h"
+#include "mf_video_reader.h"
 #include "shader.h"
 #include "texture.h"
 #include "texture_pool.h"
@@ -113,6 +114,8 @@ public:
     void    importImageFiles(const std::vector<std::string>& filepathArray, 
                 bool recordAction, std::vector<uint16_t>* imageIdxArray = nullptr);
 
+    void    openVideoFile(const std::string& filepath);
+
     void    run(CompositeFlags initFlags = CompositeFlags::Top);
 
     void    release();
@@ -212,7 +215,18 @@ private:
 
     void    toggleSideBySideView();
 
-private:
+    void    exitVideoMode();
+
+    void    initVideoTransportBar(const ImGuiIO& io);
+
+    void    tickAndUploadVideoFrame(float deltaTime);
+
+    void    renderVideoBlit(const ImGuiIO& io);
+
+    void    recreateVideoTexture();
+
+    void    uploadVideoTexture();
+
     using ImageUPtr = std::unique_ptr<Image>;
 
     std::vector<ImageUPtr>      mImageList;
@@ -281,6 +295,19 @@ private:
     bool        mShowPixelMarker = false;
     bool        mSupportComputeShader = false;
     bool        mUpdateImageSelection = false;
+
+    bool        mVideoMode = false;
+    bool        mVideoPlaying = false;
+    double      mVideoPlaybackTimeBank = 0.0;
+    double      mVideoScrubValue = 0.0;
+    std::unique_ptr<MFVideoReader> mVideoReader;
+    GLuint      mVideoTexture = 0;
+    Shader      mVideoBlitShader;
+    bool        mVideoShaderReady = false;
+
+#if defined(_WIN32) && defined(USE_VIDEO)
+    bool        mVideoComInitialized = false;
+#endif
 };
 
 }  // namespace baktsiu

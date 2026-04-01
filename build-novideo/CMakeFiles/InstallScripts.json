@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/ext/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/ext/glfw/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/ext/glfw/src/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/ext/spdlog/cmake_install.cmake",
+		"C:/Users/WXP/Documents/GitHub/baktsiu/build-novideo/src/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
