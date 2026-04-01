@@ -2529,11 +2529,13 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
     if (!ItemAdd(total_bb, id, &frame_bb))
         return false;
 
-    // Default format string when passing NULL
-    if (format == NULL)
-        format = DataTypeGetInfo(data_type)->PrintFmt;
+    // Default format string when passing NULL; empty string hides centered value only (fmt_for_logic still needed).
+    const bool hide_center_value = (format != NULL && format[0] == '\0');
+    const char* fmt_for_logic = format;
+    if (fmt_for_logic == NULL || fmt_for_logic[0] == '\0')
+        fmt_for_logic = DataTypeGetInfo(data_type)->PrintFmt;
     else if (data_type == ImGuiDataType_S32 && strcmp(format, "%d") != 0) // (FIXME-LEGACY: Patch old "%.0f" format string to use "%d", read function more details.)
-        format = PatchFormatStringFloatToInt(format);
+        fmt_for_logic = PatchFormatStringFloatToInt(format);
 
     // Tabbing or CTRL-clicking on Slider turns it into an input box
     const bool hovered = ItemHoverable(frame_bb, id);
@@ -2557,7 +2559,7 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
         }
     }
     if (temp_input_is_active || temp_input_start)
-        return TempInputTextScalar(frame_bb, id, label, data_type, p_data, format);
+        return TempInputTextScalar(frame_bb, id, label, data_type, p_data, fmt_for_logic);
 
     // Draw frame
     const ImU32 frame_col = GetColorU32(g.ActiveId == id ? ImGuiCol_FrameBgActive : g.HoveredId == id ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg);
@@ -2566,7 +2568,7 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
 
     // Slider behavior
     ImRect grab_bb;
-    const bool value_changed = SliderBehavior(frame_bb, id, data_type, p_data, p_min, p_max, format, power, ImGuiSliderFlags_None, &grab_bb);
+    const bool value_changed = SliderBehavior(frame_bb, id, data_type, p_data, p_min, p_max, fmt_for_logic, power, ImGuiSliderFlags_None, &grab_bb);
     if (value_changed)
         MarkItemEdited(id);
 
@@ -2575,9 +2577,12 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
         window->DrawList->AddRectFilled(grab_bb.Min, grab_bb.Max, GetColorU32(g.ActiveId == id ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab), style.GrabRounding);
 
     // Display value using user-provided display format so user can add prefix/suffix/decorations to the value.
-    char value_buf[64];
-    const char* value_buf_end = value_buf + DataTypeFormatString(value_buf, IM_ARRAYSIZE(value_buf), data_type, p_data, format);
-    RenderTextClipped(frame_bb.Min, frame_bb.Max, value_buf, value_buf_end, NULL, ImVec2(0.5f,0.5f));
+    if (!hide_center_value)
+    {
+        char value_buf[64];
+        const char* value_buf_end = value_buf + DataTypeFormatString(value_buf, IM_ARRAYSIZE(value_buf), data_type, p_data, fmt_for_logic);
+        RenderTextClipped(frame_bb.Min, frame_bb.Max, value_buf, value_buf_end, NULL, ImVec2(0.5f,0.5f));
+    }
 
     if (label_size.x > 0.0f)
         RenderText(ImVec2(frame_bb.Max.x + style.ItemInnerSpacing.x, frame_bb.Min.y + style.FramePadding.y), label);

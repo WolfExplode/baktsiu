@@ -16,7 +16,20 @@
 #include <spdlog/spdlog.h>
 #pragma warning(pop)
 
+#if defined(_WIN32) && defined(USE_VIDEO)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
+#include <algorithm>
+#include <climits>
+#include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -254,6 +267,27 @@ void PlotMultiHistograms(
 } // namespace ImGui
 
 
+namespace
+{
+
+void formatVideoHms(double secIn, char* out, size_t outSize)
+{
+    if (outSize == 0) {
+        return;
+    }
+    if (secIn < 0.0) {
+        secIn = 0.0;
+    }
+    const double capped = std::min(secIn, static_cast<double>(LLONG_MAX / 16));
+    const long long t = static_cast<long long>(std::floor(capped + 0.0005));
+    const long long h = t / 3600LL;
+    const long long m = (t % 3600LL) / 60LL;
+    const long long s = t % 60LL;
+    std::snprintf(out, outSize, "%lld:%02lld:%02lld", h, m, s);
+}
+
+}  // namespace
+
 namespace baktsiu
 {
 
@@ -330,6 +364,11 @@ void App::initLogger()
 bool App::initialize(const char* title, int width, int height)
 {
     initLogger();
+
+#if defined(_WIN32) && defined(USE_VIDEO)
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    mVideoComInitialized = (hrCom == S_OK);
+#endif
 
     glfwSetErrorCallback([](int error, const char* description) {
         LOGW("GLFW error {}: {}", error, description);
@@ -462,6 +501,15 @@ bool App::initialize(const char* title, int width, int height)
     status = INIT_SHADER(mGradingShader, "color_grading", quad, color_grading);
     CHECK_AND_RETURN_IT(status, "Failed to initialize color grading shader");
 
+#if defined(USE_VIDEO)
+    status = INIT_SHADER(mVideoBlitShader, "video_blit", video_blit, video_blit);
+    if (!status) {
+        LOGW("Failed to initialize video blit shader");
+    } else {
+        mVideoShaderReady = true;
+    }
+#endif
+
     if (mSupportComputeShader) {
         glGenTextures(1, &mTexHistogram);
         glBindTexture(GL_TEXTURE_2D, mTexHistogram);
@@ -516,6 +564,14 @@ void App::initDigitCharData(const unsigned char* data)
 
 void App::release()
 {
+#if defined(USE_VIDEO)
+    exitVideoMode();
+    if (mVideoShaderReady) {
+        mVideoBlitShader.release();
+        mVideoShaderReady = false;
+    }
+#endif
+
     // Cleanup
     mImageList.clear();
     mPointSampler.release();
@@ -529,6 +585,13 @@ void App::release()
 
     glfwDestroyWindow(mWindow);
     glfwTerminate();
+
+#if defined(_WIN32) && defined(USE_VIDEO)
+    if (mVideoComInitialized) {
+        CoUninitialize();
+        mVideoComInitialized = false;
+    }
+#endif
 }
 
 // This is executed in main thread (which has GL context).
@@ -583,6 +646,12 @@ void App::run(CompositeFlags initFlags)
             shouldChangeComposition = false;
         }
 
+#if defined(USE_VIDEO)
+        const bool videoActive = mVideoMode && mVideoReader && mVideoReader->isOpen();
+#else
+        const bool videoActive = false;
+#endif
+
         // Start the Dear ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -606,28 +675,39 @@ void App::run(CompositeFlags initFlags)
         Vec2f imageSize = topImage ? topImage->size() : Vec2f(1.0f);
 
         const bool useColumnView = inSideBySideMode();
-        if (useColumnView) {
-            const float leftColumnWidth = io.DisplaySize.x * mViewSplitPos;
-            mColumnViews[0].resize(Vec2f(leftColumnWidth, io.DisplaySize.y));
-            mColumnViews[1].resize(Vec2f(io.DisplaySize.x - leftColumnWidth, io.DisplaySize.y));
-            mColumnViews[0].setImageSize(imageSize);
-            mColumnViews[1].setImageSize(imageSize);
-        } else {
-            mView.resize(io.DisplaySize);
-            mView.setImageSize(imageSize);
-        }
+        if (!videoActive) {
+            if (useColumnView) {
+                const float leftColumnWidth = io.DisplaySize.x * mViewSplitPos;
+                mColumnViews[0].resize(Vec2f(leftColumnWidth, io.DisplaySize.y));
+                mColumnViews[1].resize(Vec2f(io.DisplaySize.x - leftColumnWidth, io.DisplaySize.y));
+                mColumnViews[0].setImageSize(imageSize);
+                mColumnViews[1].setImageSize(imageSize);
+            } else {
+                mView.resize(io.DisplaySize);
+                mView.setImageSize(imageSize);
+            }
 
-        updateImageTransform(io, useColumnView);
+            updateImageTransform(io, useColumnView);
 
-        const bool enableCompareView = inCompareMode();
-        if (shouldShowSplitter() && mShowImageNameOverlay) {
-            showImageNameOverlays();
-        }
+            const bool enableCompareView = inCompareMode();
+            if (shouldShowSplitter() && mShowImageNameOverlay) {
+                showImageNameOverlays();
+            }
 
-        if (enableCompareView && ((getPixelMarkerFlags() & 0x2) > 0)) {
-            Vec2f heatbarPos(8.0f, io.DisplaySize.y - mFooterHeight - 8.0f - 20.0f);
-            showHeatRangeOverlay(heatbarPos, 150.0f);
+            if (enableCompareView && ((getPixelMarkerFlags() & 0x2) > 0)) {
+                Vec2f heatbarPos(8.0f, io.DisplaySize.y - mFooterHeight - 8.0f - 20.0f);
+                showHeatRangeOverlay(heatbarPos, 150.0f);
+            }
         }
+#if defined(USE_VIDEO)
+        else {
+            tickAndUploadVideoFrame(io.DeltaTime);
+            initVideoTransportBar(io);
+            if (mShowImageNameOverlay) {
+                showImageNameOverlays();
+            }
+        }
+#endif
         
         // Since GLFW doesn't support cursor of resize all, thus we use imgui to draw that cursor.
         // Caution: the cursor is hidden when using imgui's drawn cursor, when the root window is unfocused.
@@ -637,79 +717,88 @@ void App::run(CompositeFlags initFlags)
 
         ImGui::Render();
 
-        if (topImage && topImage->texId() != 0) {
-            gradingTexImage(*topImage, mTopImageRenderTexIdx);
-            if (mShowImagePropWindow && mSupportComputeShader) {
-                float valueScale = topImage->getColorEncodingType() == ColorEncodingType::Linear ? 1.0f : 255.0f;
-                computeImageStatistics(mRenderTextures[mTopImageRenderTexIdx], valueScale);
+        if (!videoActive) {
+            if (topImage && topImage->texId() != 0) {
+                gradingTexImage(*topImage, mTopImageRenderTexIdx);
+                if (mShowImagePropWindow && mSupportComputeShader) {
+                    float valueScale = topImage->getColorEncodingType() == ColorEncodingType::Linear ? 1.0f : 255.0f;
+                    computeImageStatistics(mRenderTextures[mTopImageRenderTexIdx], valueScale);
+                }
             }
-        }
 
-        if (enableCompareView && mCmpImageIndex >= 0) {
-            Image* cmpImage = mImageList[mCmpImageIndex].get();
-            if (cmpImage->texId() != 0) {
-                gradingTexImage(*cmpImage, mTopImageRenderTexIdx ^ 1);
+            const bool enableCompareView = inCompareMode();
+            if (enableCompareView && mCmpImageIndex >= 0) {
+                Image* cmpImage = mImageList[mCmpImageIndex].get();
+                if (cmpImage->texId() != 0) {
+                    gradingTexImage(*cmpImage, mTopImageRenderTexIdx ^ 1);
+                }
             }
+
+            // We have to apply framebuffer scale for hidh DPI display.
+            const Vec2f viewportSize = io.DisplaySize * io.DisplayFramebufferScale;
+            glViewport(0, 0, static_cast<GLsizei>(viewportSize.x), static_cast<GLsizei>(viewportSize.y));
+            glClearColor(0.45f, 0.55f, 0.6f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDepthMask(GL_FALSE);
+            glDisable(GL_DEPTH_TEST);
+
+            // Render image viewer display
+            // TODO: Use depth culling to avoid over-drawing.
+            mPresentShader.bind();
+            glActiveTexture(GL_TEXTURE0);
+
+            // We have to forcely use nearest filter to properly show numerical values within a pixel.
+            const View& topView = useColumnView ? mColumnViews[0] : mView;
+            const View& bottomView = useColumnView ? mColumnViews[1] : mView;
+            const float imageScale = topView.getImageScale();
+            const bool forceNearestFilter = imageScale > 5.0f;
+
+            if (topImage) {
+                mRenderTextures[mTopImageRenderTexIdx].bindAsInput(mUseLinearFilter && !forceNearestFilter);
+
+                Vec2f imageSizeDraw = topImage->size();
+                mPresentShader.setUniform("uImageSize", imageSizeDraw * imageScale);
+                mPresentShader.setUniform("uOffset", topView.getImageOffset());
+                mPresentShader.setUniform("uImage1", 0);
+            } else {
+                mPresentShader.setUniform("uImageSize", Vec2f(0.0f));
+            }
+
+            mPresentShader.setUniform("uEnablePixelHighlight", !mIsMovingSplitter && !mIsScalingImage);
+            mPresentShader.setUniform("uCursorPos", Vec2f(io.MousePos.x, io.DisplaySize.y - io.MousePos.y) + Vec2f(0.5f));
+            mPresentShader.setUniform("uSideBySide", mCompositeFlags == CompositeFlags::SideBySide);
+            mPresentShader.setUniform("uPixelMarkerFlags", getPixelMarkerFlags());
+            mPresentShader.setUniform("uPresentMode", mCurrentPresentMode);
+            mPresentShader.setUniform("uOutTransformType", mOutTransformType);
+            mPresentShader.setUniform("uWindowSize", Vec2f(io.DisplaySize));
+            mPresentShader.setUniform("uImageScale", imageScale);
+            mPresentShader.setUniform("uSplitPos", enableCompareView ? mViewSplitPos : 1.0f);
+            mPresentShader.setUniform("uDisplayGamma", mDisplayGamma);
+            mPresentShader.setUniform("uApplyToneMapping", mEnableToneMapping);
+            mPresentShader.setUniform("uCharUvRanges", mCharUvRanges);
+            mPresentShader.setUniform("uCharUvXforms", mCharUvXforms);
+            mPresentShader.setUniform("uPixelBorderHighlightColor", mPixelBorderHighlightColor);
+
+            if (enableCompareView && mCmpImageIndex >= 0) {
+                glActiveTexture(GL_TEXTURE1);
+                mRenderTextures[mTopImageRenderTexIdx ^ 1].bindAsInput(mUseLinearFilter && !forceNearestFilter);
+                mPresentShader.setUniform("uImage2", 1);
+                mPresentShader.setUniform("uOffsetExtra", bottomView.getImageOffset());
+                mPresentShader.setUniform("uRelativeOffset", (bottomView.getLocalOffset() - topView.getLocalOffset()) * mImageScale);
+            }
+
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, mFontTexture);
+            mPresentShader.setUniform("uFontImage", 2);
+
+            mPresentShader.drawTriangle();
         }
-
-        // We have to apply framebuffer scale for hidh DPI display.
-        const Vec2f viewportSize = io.DisplaySize * io.DisplayFramebufferScale;
-        glViewport(0, 0, static_cast<GLsizei>(viewportSize.x), static_cast<GLsizei>(viewportSize.y));
-        glClearColor(0.45f, 0.55f, 0.6f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glDepthMask(GL_FALSE);
-        glDisable(GL_DEPTH_TEST);
-
-        // Render image viewer display
-        // TODO: Use depth culling to avoid over-drawing.
-        mPresentShader.bind();
-        glActiveTexture(GL_TEXTURE0);
-
-        // We have to forcely use nearest filter to properly show numerical values within a pixel.
-        const View& topView = useColumnView ? mColumnViews[0] : mView;
-        const View& bottomView = useColumnView ? mColumnViews[1] : mView;
-        const float imageScale = topView.getImageScale();
-        const bool forceNearestFilter = imageScale > 5.0f;
-
-        if (topImage) {
-            mRenderTextures[mTopImageRenderTexIdx].bindAsInput(mUseLinearFilter && !forceNearestFilter);
-
-            Vec2f imageSize = topImage->size();
-            mPresentShader.setUniform("uImageSize", imageSize * imageScale);
-            mPresentShader.setUniform("uOffset", topView.getImageOffset());
-            mPresentShader.setUniform("uImage1", 0);
-        } else {
-            mPresentShader.setUniform("uImageSize", Vec2f(0.0f));
+#if defined(USE_VIDEO)
+        else {
+            renderVideoBlit(io);
         }
+#endif
 
-        mPresentShader.setUniform("uEnablePixelHighlight", !mIsMovingSplitter && !mIsScalingImage);
-        mPresentShader.setUniform("uCursorPos", Vec2f(io.MousePos.x, io.DisplaySize.y - io.MousePos.y) + Vec2f(0.5f));
-        mPresentShader.setUniform("uSideBySide", mCompositeFlags == CompositeFlags::SideBySide);
-        mPresentShader.setUniform("uPixelMarkerFlags", getPixelMarkerFlags());
-        mPresentShader.setUniform("uPresentMode", mCurrentPresentMode);
-        mPresentShader.setUniform("uOutTransformType", mOutTransformType);
-        mPresentShader.setUniform("uWindowSize", Vec2f(io.DisplaySize));
-        mPresentShader.setUniform("uImageScale", imageScale);
-        mPresentShader.setUniform("uSplitPos", enableCompareView ? mViewSplitPos : 1.0f);
-        mPresentShader.setUniform("uDisplayGamma", mDisplayGamma);
-        mPresentShader.setUniform("uApplyToneMapping", mEnableToneMapping);
-        mPresentShader.setUniform("uCharUvRanges", mCharUvRanges);
-        mPresentShader.setUniform("uCharUvXforms", mCharUvXforms);
-        mPresentShader.setUniform("uPixelBorderHighlightColor", mPixelBorderHighlightColor);
-
-        if (enableCompareView && mCmpImageIndex >= 0) {
-            glActiveTexture(GL_TEXTURE1);
-            mRenderTextures[mTopImageRenderTexIdx ^ 1].bindAsInput(mUseLinearFilter && !forceNearestFilter);
-            mPresentShader.setUniform("uImage2", 1);
-            mPresentShader.setUniform("uOffsetExtra", bottomView.getImageOffset());
-            mPresentShader.setUniform("uRelativeOffset", (bottomView.getLocalOffset() - topView.getLocalOffset()) * mImageScale);
-        }
-
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, mFontTexture);
-        mPresentShader.setUniform("uFontImage", 2);
-
-        mPresentShader.drawTriangle();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(mWindow);
@@ -790,6 +879,13 @@ void    App::onKeyPressed(const ImGuiIO& io)
         toggleSplitView();
     } else if (ImGui::IsKeyPressed(0x43)) { // c
         toggleSideBySideView();
+    } else if (ImGui::IsKeyPressed(32)) { // Space
+#if defined(USE_VIDEO)
+        if (mVideoMode && mVideoReader && mVideoReader->isOpen() && !io.WantTextInput) {
+            mVideoPlaying ^= true;
+            mVideoPlaybackTimeBank = 0.0;
+        }
+#endif
     } else if (ImGui::IsKeyPressed(0x51)) { // q
         mUseLinearFilter ^= true;
     } else if (ImGui::IsKeyPressed(0x57)) { // w
@@ -815,7 +911,12 @@ void    App::onKeyPressed(const ImGuiIO& io)
 
 void    App::updateImageSplitterPos(ImGuiIO& io)
 {
-    if (!shouldShowSplitter()) {
+#if defined(USE_VIDEO)
+    const bool splitForVideoCompare = mVideoMode && videoCompareActive();
+#else
+    const bool splitForVideoCompare = false;
+#endif
+    if (!shouldShowSplitter() && !splitForVideoCompare) {
         mIsMovingSplitter = false;
         return;
     }
@@ -998,6 +1099,73 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
 
 void App::updateImagePairFromPressedKeys()
 {
+#if defined(USE_VIDEO)
+    // In video compare mode, reuse the same key bindings as image compare:
+    // - Up / X: swap sides
+    // - Left/A, Right/D: cycle the left selection (keep right distinct when possible)
+    if (mVideoMode) {
+        const bool isSwap = ImGui::IsKeyPressed(0x109) || ImGui::IsKeyPressed(0x58);  // Up arrow or 'x'
+        const bool isNext = ImGui::IsKeyPressed(0x106) || ImGui::IsKeyPressed(0x44);  // Right arrow or 'd'
+        const bool isPrev = ImGui::IsKeyPressed(0x107) || ImGui::IsKeyPressed(0x41);  // Left arrow or 'a'
+        const int n = static_cast<int>(mVideoPaths.size());
+        if (n >= 2 && (isSwap || isNext || isPrev)) {
+            if (isSwap) {
+                // If we're not currently in compare (only one decoder open), ensure the other side is
+                // selected/opened first (especially important when exactly two media are loaded).
+                if (!videoCompareActive()) {
+                    if (mVideoIndexL < 0 || mVideoIndexL >= n) {
+                        mVideoIndexL = 0;
+                    }
+                    if (mVideoIndexR < 0 || mVideoIndexR >= n || mVideoIndexR == mVideoIndexL) {
+                        mVideoIndexR = (mVideoIndexL == 0) ? 1 : 0;
+                    }
+                    openVideosFromSelection();
+                }
+                swapVideoSides();
+                return;
+            } else if (isNext || isPrev) {
+                // With exactly 2 media, Left/Right should behave like images and swap instantly.
+                // Avoid re-opening readers/textures (which is expensive) when we can just swap in memory.
+                if (n == 2 && videoCompareActive()) {
+                    swapVideoSides();
+                    return;
+                }
+                // Match image behavior: advance DISPLAYED-left selection; keep DISPLAYED-right distinct by advancing it
+                // only if it collides with the new left. This makes Left/Right swap when n==2.
+                const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+                int& idxDispL = dispSwap ? mVideoIndexR : mVideoIndexL;
+                int& idxDispR = dispSwap ? mVideoIndexL : mVideoIndexR;
+
+                int l = idxDispL;
+                int r = idxDispR;
+                if (l < 0 || l >= n) {
+                    l = 0;
+                }
+                if (r < 0 || r >= n || r == l) {
+                    r = (n >= 2) ? ((l + 1) % n) : -1;
+                }
+
+                if (isNext) {
+                    l = (l + 1) % n;
+                    if (r == l) {
+                        r = (r + 1) % n;
+                    }
+                } else {
+                    l = (l - 1 + n) % n;
+                    if (r == l) {
+                        r = (r - 1 + n) % n;
+                    }
+                }
+
+                idxDispL = l;
+                idxDispR = r;
+            }
+            openVideosFromSelection();
+        }
+        return;
+    }
+#endif
+
     const int imageNum = static_cast<int>(mImageList.size());
     if (imageNum < 2) {
         return;
@@ -1326,10 +1494,18 @@ void App::initImagePropWindow()
     const float toolbarHeight = buttonSize.y + g.Style.FramePadding.y * 2.0f + g.Style.ItemSpacing.y;
     const float titleHeight = ImGui::GetFrameHeightWithSpacing() + spacerHeight;
     ImGui::Dummy(Vec2f(0.0f, spacerHeight));
-    ImGui::Text("  " ICON_FA_LAYER_GROUP "  Images");
+    ImGui::Text("  " ICON_FA_LAYER_GROUP "  %s", mVideoMode ? "Media" : "Images");
 
     ImGui::BeginChild("ScrollingRegion2", ImVec2(propWindowWidth - g.Style.WindowPadding.x, size2 - titleHeight - toolbarHeight), true);
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, Vec2f(0.0f, 0.5f));
+
+    auto basename = [](const std::string& p) -> const char* {
+        if (p.empty()) {
+            return "";
+        }
+        size_t i = p.find_last_of("/\\");
+        return (i == std::string::npos) ? p.c_str() : p.c_str() + i + 1;
+    };
 
     const int bufSize = 64;
     const int maxFilenameLength = bufSize - 10; // Reserve 10 chars for icon and spaces
@@ -1344,101 +1520,166 @@ void App::initImagePropWindow()
     static bool isDraggingImageItem = false;
     static std::unique_ptr<Action> moveAction;
 
-    for (int i = 0; i < imageNum; i++) {
-        std::string filename = mImageList[i]->filename();
-        void* addr = mImageList[i].get();
-        const auto filenameLength = filename.size();
-        if (filenameLength > maxFilenameLength) {
-            filename = filename.substr(filenameLength - maxFilenameLength);
-            snprintf(buf, bufSize, "        ...%s##%p", filename.c_str(), addr);
-        } else {
-            snprintf(buf, bufSize, "           %s##%p", filename.c_str(), addr);
-        }
+    if (mVideoMode) {
+        const ImVec4 tintL(0.25f, 0.80f, 0.75f, 1.0f);
+        const ImVec4 tintR(0.95f, 0.55f, 0.20f, 1.0f);
+        // Make video entries clickable. "L/R" tags reflect the PRESENTED left/right when
+        // mVideoSwapPresentationLR is enabled (presentation-only swap for instant switching).
+#if defined(USE_VIDEO)
+        const int nMedia = static_cast<int>(mVideoPaths.size());
+        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+        int& idxDispL = dispSwap ? mVideoIndexR : mVideoIndexL;
+        int& idxDispR = dispSwap ? mVideoIndexL : mVideoIndexR;
 
-        if (ImGui::Selectable(buf, mTopImageIndex == i && !isDraggingImageItem, 0, Vec2f(propWindowWidth, imageItemHeight))) {
-            if (isDraggingImageItem) {
-                isDraggingImageItem = false;
-                if (moveAction) {
-                    if (moveAction->prevTopImageIdx != mTopImageIndex ||
-                        moveAction->prevCmpImageIdx != mCmpImageIndex) {
-                        appendAction(std::move(*moveAction));
+        for (int i = 0; i < nMedia; ++i) {
+            const bool isL = (i == idxDispL);
+            const bool isR = (i == idxDispR);
+            const ImVec4 tint = isL ? tintL : (isR ? tintR : ImGui::GetStyleColorVec4(ImGuiCol_Text));
+
+            ImGui::PushID(i);
+            char row[160];
+            const char* tag = isL ? "L" : (isR ? "R" : " ");
+            std::snprintf(row, sizeof row, "%s  %s", tag, basename(mVideoPaths[i]));
+            ImGui::PushStyleColor(ImGuiCol_Text, tint);
+            ImGui::Selectable(row, false, 0, Vec2f(propWindowWidth, imageItemHeight));
+            const bool lmb = ImGui::IsItemClicked(0);
+            const bool rmb = ImGui::IsItemClicked(1);
+            ImGui::PopStyleColor(1);
+            ImGui::PopID();
+
+            if (lmb) {
+                if (i == idxDispL) {
+                    continue; // no-op
+                }
+                // LMB sets the PRESENTED-left selection.
+                idxDispL = i;
+                if (idxDispR == idxDispL) {
+                    if (nMedia >= 2) {
+                        idxDispR = (i == 0) ? 1 : 0;
+                    } else {
+                        idxDispR = -1;
                     }
                 }
-
-                moveAction.reset();
+                openVideosFromSelection();
+            } else if (rmb) {
+                if (i == idxDispR) {
+                    continue; // no-op
+                }
+                // RMB sets the PRESENTED-right selection.
+                idxDispR = i;
+                if (idxDispR == idxDispL) {
+                    if (nMedia >= 2) {
+                        idxDispL = (i == 0) ? 1 : 0;
+                    } else {
+                        idxDispL = -1;
+                    }
+                }
+                openVideosFromSelection();
+            }
+        }
+#else
+        (void)tintL;
+        (void)tintR;
+        if (!mVideoPathL.empty()) { ImGui::TextUnformatted(basename(mVideoPathL)); }
+        if (!mVideoPathR.empty()) { ImGui::TextUnformatted(basename(mVideoPathR)); }
+#endif
+    } else {
+        for (int i = 0; i < imageNum; i++) {
+            std::string filename = mImageList[i]->filename();
+            void* addr = mImageList[i].get();
+            const auto filenameLength = filename.size();
+            if (filenameLength > maxFilenameLength) {
+                filename = filename.substr(filenameLength - maxFilenameLength);
+                snprintf(buf, bufSize, "        ...%s##%p", filename.c_str(), addr);
             } else {
-                mTopImageIndex = i;
-                if (mCmpImageIndex == i) {
-                    mCmpImageIndex = (mCmpImageIndex + 1) % imageNum;
-                }
-            }
-        }
-
-        // Right click mouse to set compared imaeg directly.
-        if (ImGui::IsItemClicked(1)) {
-            if (mTopImageIndex == i) {
-                mTopImageIndex = mCmpImageIndex;
-            }
-            mCmpImageIndex = i;
-        }
-
-        if (!isDraggingImageItem && ImGui::IsItemHovered()) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        } else if (isDraggingImageItem) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-        }
-
-        if (ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
-            isDraggingImageItem = true;
-            if (!moveAction) {
-                moveAction = std::make_unique<Action>();
-                moveAction->type = Action::Type::Move;
-                for (uint8_t i = 0; i < static_cast<uint8_t>(mImageList.size()); i++) {
-                    moveAction->imageIdxArray.push_back(Action::composeImageIndex(mImageList[i]->id(), i));
-                }
-                moveAction->prevTopImageIdx = mTopImageIndex;
-                moveAction->prevCmpImageIdx = mCmpImageIndex;
+                snprintf(buf, bufSize, "           %s##%p", filename.c_str(), addr);
             }
 
-            const int nextItemIdx = i + (ImGui::GetMouseDragDelta(0).y < 0.0f ? -1 : 1);
-            if (nextItemIdx >= 0 && nextItemIdx < imageNum) {
-                std::swap(mImageList[i], mImageList[nextItemIdx]);
-                ImGui::ResetMouseDragDelta();
+            if (ImGui::Selectable(buf, mTopImageIndex == i && !isDraggingImageItem, 0, Vec2f(propWindowWidth, imageItemHeight))) {
+                if (isDraggingImageItem) {
+                    isDraggingImageItem = false;
+                    if (moveAction) {
+                        if (moveAction->prevTopImageIdx != mTopImageIndex ||
+                            moveAction->prevCmpImageIdx != mCmpImageIndex) {
+                            appendAction(std::move(*moveAction));
+                        }
+                    }
 
-                if (nextItemIdx == mTopImageIndex) {
+                    moveAction.reset();
+                } else {
                     mTopImageIndex = i;
                     if (mCmpImageIndex == i) {
-                        mCmpImageIndex = nextItemIdx;
-                    }
-                } else if (nextItemIdx == mCmpImageIndex) {
-                    mCmpImageIndex = i;
-                    if (mTopImageIndex == i) {
-                        mTopImageIndex = nextItemIdx;
-                    }
-                } else {
-                    if (mTopImageIndex == i) {
-                        mTopImageIndex = nextItemIdx;
-                    } else if (mCmpImageIndex == i) {
-                        mCmpImageIndex = nextItemIdx;
+                        mCmpImageIndex = (mCmpImageIndex + 1) % imageNum;
                     }
                 }
             }
-        }
 
-        const GLuint texId = mImageList[i]->texId();
-        if (texId != 0) {
-            ImGui::SameLine(g.Style.ItemSpacing.x);
-            ImGui::Image((void*)(intptr_t)texId, Vec2f(28.0f, 22.0f), Vec2f(0.0f, 0.0f), Vec2f(1.0f, 1.0f),
-                Vec4f(1.0f), mTopImageIndex == i ? activeBorderColor : borderColor);
-        }
+            // Right click mouse to set compared imaeg directly.
+            if (ImGui::IsItemClicked(1)) {
+                if (mTopImageIndex == i) {
+                    mTopImageIndex = mCmpImageIndex;
+                }
+                mCmpImageIndex = i;
+            }
 
-        if ((i == mCmpImageIndex || i == mTopImageIndex) && enableCompareView) {
-            bool hasScrollBar = imageListWindowHeight < (imageNum * (imageItemHeight + g.Style.ItemSpacing.y) + g.Style.ItemSpacing.y);
-            float scrollBarSpace = hasScrollBar ? g.Style.ScrollbarSize : 0.0f;
-            
-            ImGui::SameLine(propWindowWidth - g.FontSize - g.Style.ItemSpacing.x * 2.0f - scrollBarSpace);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(i == mCmpImageIndex ? ICON_FA_ANGLE_RIGHT : ICON_FA_ANGLE_LEFT);
+            if (!isDraggingImageItem && ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            } else if (isDraggingImageItem) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            }
+
+            if (ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
+                isDraggingImageItem = true;
+                if (!moveAction) {
+                    moveAction = std::make_unique<Action>();
+                    moveAction->type = Action::Type::Move;
+                    for (uint8_t i = 0; i < static_cast<uint8_t>(mImageList.size()); i++) {
+                        moveAction->imageIdxArray.push_back(Action::composeImageIndex(mImageList[i]->id(), i));
+                    }
+                    moveAction->prevTopImageIdx = mTopImageIndex;
+                    moveAction->prevCmpImageIdx = mCmpImageIndex;
+                }
+
+                const int nextItemIdx = i + (ImGui::GetMouseDragDelta(0).y < 0.0f ? -1 : 1);
+                if (nextItemIdx >= 0 && nextItemIdx < imageNum) {
+                    std::swap(mImageList[i], mImageList[nextItemIdx]);
+                    ImGui::ResetMouseDragDelta();
+
+                    if (nextItemIdx == mTopImageIndex) {
+                        mTopImageIndex = i;
+                        if (mCmpImageIndex == i) {
+                            mCmpImageIndex = nextItemIdx;
+                        }
+                    } else if (nextItemIdx == mCmpImageIndex) {
+                        mCmpImageIndex = i;
+                        if (mTopImageIndex == i) {
+                            mTopImageIndex = nextItemIdx;
+                        }
+                    } else {
+                        if (mTopImageIndex == i) {
+                            mTopImageIndex = nextItemIdx;
+                        } else if (mCmpImageIndex == i) {
+                            mCmpImageIndex = nextItemIdx;
+                        }
+                    }
+                }
+            }
+
+            const GLuint texId = mImageList[i]->texId();
+            if (texId != 0) {
+                ImGui::SameLine(g.Style.ItemSpacing.x);
+                ImGui::Image((void*)(intptr_t)texId, Vec2f(28.0f, 22.0f), Vec2f(0.0f, 0.0f), Vec2f(1.0f, 1.0f),
+                    Vec4f(1.0f), mTopImageIndex == i ? activeBorderColor : borderColor);
+            }
+
+            if ((i == mCmpImageIndex || i == mTopImageIndex) && enableCompareView) {
+                bool hasScrollBar = imageListWindowHeight < (imageNum * (imageItemHeight + g.Style.ItemSpacing.y) + g.Style.ItemSpacing.y);
+                float scrollBarSpace = hasScrollBar ? g.Style.ScrollbarSize : 0.0f;
+                
+                ImGui::SameLine(propWindowWidth - g.FontSize - g.Style.ItemSpacing.x * 2.0f - scrollBarSpace);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(i == mCmpImageIndex ? ICON_FA_ANGLE_RIGHT : ICON_FA_ANGLE_LEFT);
+            }
         }
     }
     ImGui::PopStyleVar(1);
@@ -1767,20 +2008,46 @@ void    App::showImageNameOverlays()
     ImGuiIO& io = ImGui::GetIO();
 
     const float padding = 8.0f;
+    auto basename = [](const std::string& p) -> const char* {
+        if (p.empty()) {
+            return "";
+        }
+        size_t i = p.find_last_of("/\\");
+        return (i == std::string::npos) ? p.c_str() : p.c_str() + i + 1;
+    };
 
     Vec2f windowPos(padding, mToolbarHeight + padding);
     ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.5f);
     const ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
     if (ImGui::Begin("##ImageOverlay1", nullptr, windowFlags)) {
-        ImGui::TextUnformatted(mImageList[mTopImageIndex]->filename().c_str());
+        if (mVideoMode && !mVideoPathL.empty()) {
+            const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+            ImGui::TextUnformatted(basename(dispSwap ? mVideoPathR : mVideoPathL));
+        } else if (mTopImageIndex >= 0) {
+            ImGui::TextUnformatted(mImageList[mTopImageIndex]->filename().c_str());
+        }
     }
     ImGui::End();
 
+    if (mVideoMode) {
+        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+        if ((dispSwap ? mVideoPathL : mVideoPathR).empty()) {
+            return;
+        }
+    } else {
+        if (mCmpImageIndex < 0) {
+            return;
+        }
+    }
+
     ImGuiContext& g = *ImGui::GetCurrentContext();
     const float imagePropHandleWidth = g.FontSize + g.Style.FramePadding.x * 4.0f;
-    const std::string& cmpImageName = mImageList[mCmpImageIndex]->filename();
-    windowPos.x = io.DisplaySize.x - padding - ImGui::CalcTextSize(cmpImageName.c_str()).x - imagePropHandleWidth;
+    const std::string& cmpImageName = mVideoMode ? mVideoPathR : mImageList[mCmpImageIndex]->filename();
+    const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+    const std::string& shownPath = mVideoMode ? (dispSwap ? mVideoPathL : mVideoPathR) : cmpImageName;
+    const char* shownName = mVideoMode ? basename(shownPath) : shownPath.c_str();
+    windowPos.x = io.DisplaySize.x - padding - ImGui::CalcTextSize(shownName).x - imagePropHandleWidth;
     if (mShowImagePropWindow || mPopupImagePropWindow) {
         windowPos.x -= getPropWindowWidth();
     }
@@ -1788,7 +2055,7 @@ void    App::showImageNameOverlays()
     ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.5f);
     if (ImGui::Begin("##ImageOverlay2", nullptr, windowFlags)) {
-        ImGui::TextUnformatted(cmpImageName.c_str());
+        ImGui::TextUnformatted(shownName);
     }
     ImGui::End();
 }
@@ -1913,13 +2180,14 @@ void App::undoAction()
 void    App::showImportImageDlg()
 {
     static std::vector<std::string> filters = {
-        "Supported Image Files", "*.bmp; *.exr; *.gif; *.jpg; *.hdr; *.png; *.bts" ,
+        "Supported Image Files", "*.bmp; *.exr; *.gif; *.jpg; *.hdr; *.png; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v" ,
         "BMP (*.BMP)", "*.bmp",
         "OpenEXR (*.EXR)", "*.exr",
         "GIF (*.GIF)", "*.gif",
         "JPEG (*.JPG, *.JPEG)", "*.jpg; *.jpeg",
         "HDR (*.HDR)", "*.hdr",
         "PNG (*.PNG)", "*.png",
+        "Video (*.MP4, *.MOV, ...)", "*.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v",
         "Bak-Tsiu Session (*.BTS)", "*.bts",
     };
 
@@ -1934,8 +2202,35 @@ void    App::showImportImageDlg()
         }
     }
 
-    if (!selection.empty()) {
-        importImageFiles(selection, true);
+    std::vector<std::string> videoPaths;
+    std::vector<std::string> imagePaths;
+    for (const std::string& path : selection) {
+        if (MFVideoReader::isSupportedExtension(path)) {
+            videoPaths.push_back(path);
+        } else {
+            imagePaths.push_back(path);
+        }
+    }
+
+    if (!videoPaths.empty()) {
+#if defined(USE_VIDEO)
+        // Add all selected videos to the media list, then open current selection.
+        for (const std::string& p : videoPaths) {
+            const int idx = addVideoPath(p);
+            if (idx >= 0) {
+                if (mVideoIndexL < 0) {
+                    mVideoIndexL = idx;
+                } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
+                    mVideoIndexR = idx;
+                }
+            }
+        }
+        openVideosFromSelection();
+#else
+        LOGW("Video playback is disabled in this build (USE_VIDEO).");
+#endif
+    } else if (!imagePaths.empty()) {
+        importImageFiles(imagePaths, true);
     }
 }
 
@@ -2155,18 +2450,39 @@ void    App::onFileDrop(int count, const char* filepaths[])
 {
     std::vector<std::string> filepathArray;
     filepathArray.reserve(count);
+    std::vector<std::string> videoPaths;
 
     for (int i = 0; i < count; ++i) {
         const std::string &filepath = filepaths[i];
 
         if (endsWith(filepath, ".bts")) {
             openSession(filepath);
+        } else if (MFVideoReader::isSupportedExtension(filepath)) {
+            videoPaths.push_back(filepath);
         } else {
             filepathArray.push_back(filepath);
         }
     }
 
-    importImageFiles(filepathArray, true);
+    if (!videoPaths.empty()) {
+#if defined(USE_VIDEO)
+        for (const std::string& p : videoPaths) {
+            const int idx = addVideoPath(p);
+            if (idx >= 0) {
+                if (mVideoIndexL < 0) {
+                    mVideoIndexL = idx;
+                } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
+                    mVideoIndexR = idx;
+                }
+            }
+        }
+        openVideosFromSelection();
+#else
+        LOGW("Video playback is disabled in this build (USE_VIDEO).");
+#endif
+    } else if (!filepathArray.empty()) {
+        importImageFiles(filepathArray, true);
+    }
 }
 
 void    App::openSession(const std::string& filepath)
@@ -2199,6 +2515,763 @@ void    App::saveSession(const std::string& filepath)
     }
 
     fx::gltf::Save(sessionFile, filepath, false);
+}
+
+namespace
+{
+double mediaTimeFromComposition(double T, double startS, double durationSec)
+{
+    double t = T - startS;
+    if (durationSec > 1e-6) {
+        if (t < 0.0) {
+            t = 0.0;
+        } else if (t > durationSec) {
+            t = durationSec;
+        }
+    } else {
+        t = 0.0;
+    }
+    return t;
+}
+}  // namespace
+
+bool App::videoCompareActive() const
+{
+#if !defined(USE_VIDEO)
+    return false;
+#else
+    return mVideoReaderB != nullptr && mVideoReaderB->isOpen();
+#endif
+}
+
+void App::recomputeVideoScrubBounds(double& outMin, double& outMax) const
+{
+#if !defined(USE_VIDEO)
+    outMin = 0.0;
+    outMax = 1.0;
+#else
+    if (videoCompareActive() && mVideoReader && mVideoReader->isOpen()) {
+        const double dL = std::max(0.0, mVideoReader->durationSec());
+        const double dR = std::max(0.0, mVideoReaderB->durationSec());
+        outMin = (std::min)(mVideoStartL, mVideoStartR);
+        outMax = (std::max)(mVideoStartL + dL, mVideoStartR + dR);
+        if (outMax < outMin + 1e-3) {
+            outMax = outMin + 1.0;
+        }
+    } else if (mVideoReader && mVideoReader->isOpen()) {
+        outMin = 0.0;
+        double metaDur = mVideoReader->durationSec();
+        if (metaDur <= 0.001) {
+            metaDur = 60.0;
+        }
+        outMax = metaDur;
+    } else {
+        outMin = 0.0;
+        outMax = 1.0;
+    }
+#endif
+}
+
+void App::clampVideoCompositionT()
+{
+#if defined(USE_VIDEO)
+    double tMin = 0.0;
+    double tMax = 1.0;
+    recomputeVideoScrubBounds(tMin, tMax);
+    if (mVideoCompositionT < tMin) {
+        mVideoCompositionT = tMin;
+    }
+    if (mVideoCompositionT > tMax) {
+        mVideoCompositionT = tMax;
+    }
+#endif
+}
+
+void App::syncVideoDecodersToCompositionT()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    const double dL = mVideoReader->durationSec();
+    const double tL = mediaTimeFromComposition(mVideoCompositionT, mVideoStartL, dL);
+    mVideoReader->seek(tL);
+    mVideoReader->decodeFrameThrough(tL);
+    uploadVideoTexture();
+    if (videoCompareActive()) {
+        const double dR = mVideoReaderB->durationSec();
+        const double tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
+        mVideoReaderB->seek(tR);
+        mVideoReaderB->decodeFrameThrough(tR);
+        uploadVideoTextureB();
+    }
+#endif
+}
+
+namespace {
+std::string normalizeVideoPath(std::string p)
+{
+    std::replace(p.begin(), p.end(), '\\', '/');
+    return p;
+}
+}  // namespace
+
+void App::swapVideoSides()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    // Presentation-only swap for instant switching while playing.
+    // IMPORTANT:
+    // - We DO NOT swap decoders/readers/textures here.
+    // - We only flip the interpretation of "Left/Right" at the UI + renderer level.
+    // This avoids a costly seek/decode/upload hitch at the swap moment.
+    if (!videoCompareActive()) {
+        return;
+    }
+    mVideoSwapPresentationLR = !mVideoSwapPresentationLR;
+#endif
+}
+
+int App::addVideoPath(const std::string& filepath)
+{
+#if !defined(USE_VIDEO)
+    (void)filepath;
+    return -1;
+#else
+    const std::string path = normalizeVideoPath(filepath);
+    for (int i = 0; i < static_cast<int>(mVideoPaths.size()); ++i) {
+        if (mVideoPaths[i] == path) {
+            return i;
+        }
+    }
+    mVideoPaths.push_back(path);
+    return static_cast<int>(mVideoPaths.size()) - 1;
+#endif
+}
+
+void App::openVideosFromSelection()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    const int n = static_cast<int>(mVideoPaths.size());
+    if (n <= 0 || mVideoIndexL < 0 || mVideoIndexL >= n) {
+        return;
+    }
+
+    const int idxL = mVideoIndexL;
+    int idxR = (mVideoIndexR >= 0 && mVideoIndexR < n && mVideoIndexR != idxL) ? mVideoIndexR : -1;
+    // If exactly two media are loaded, auto-pick the other as right so compare/swap works
+    // without requiring an explicit RMB selection.
+    if (idxR < 0 && n == 2) {
+        idxR = (idxL == 0) ? 1 : 0;
+        mVideoIndexR = idxR;
+    }
+    const std::string pathL = mVideoPaths[idxL];
+    const std::string pathR = (idxR >= 0) ? mVideoPaths[idxR] : std::string();
+
+    // If the selected media are already open, don't reopen/recreate textures/reset offsets.
+    // Just resync decoding to the current composition time.
+    if (mVideoMode && mVideoReader && mVideoReader->isOpen()
+        && mVideoPathL == pathL
+        && ((idxR < 0 && mVideoPathR.empty()) || (idxR >= 0 && mVideoPathR == pathR))) {
+        // Ensure compare decoder is actually open when we expect it.
+        if (idxR < 0 || videoCompareActive()) {
+            syncVideoDecodersToCompositionT();
+            return;
+        }
+    }
+
+    auto readerL = std::make_unique<MFVideoReader>();
+    if (!readerL->open(pathL)) {
+        LOGW("Failed to open video \"{}\"", pathL);
+        return;
+    }
+    std::unique_ptr<MFVideoReader> readerR;
+    if (idxR >= 0) {
+        readerR = std::make_unique<MFVideoReader>();
+        if (!readerR->open(pathR)) {
+            LOGW("Failed to open video \"{}\"", pathR);
+            readerL->close();
+            return;
+        }
+    }
+
+    // Tear down previous decode state/textures.
+    if (mVideoReader) {
+        mVideoReader->close();
+        mVideoReader.reset();
+    }
+    if (mVideoReaderB) {
+        mVideoReaderB->close();
+        mVideoReaderB.reset();
+    }
+    if (mVideoTexture != 0) {
+        glDeleteTextures(1, &mVideoTexture);
+        mVideoTexture = 0;
+    }
+    if (mVideoTextureB != 0) {
+        glDeleteTextures(1, &mVideoTextureB);
+        mVideoTextureB = 0;
+    }
+
+    clearImages(false);
+    mTexturePool.cleanUnusedTextures();
+
+    mVideoReader = std::move(readerL);
+    mVideoReaderB = std::move(readerR);
+    mVideoMode = true;
+    mVideoPlaying = true;
+    mVideoPlaybackTimeBank = 0.0;
+
+    mVideoPathL = pathL;
+    mVideoPathR = pathR;
+    mVideoSwapPresentationLR = false;
+
+    // Reset offsets when changing active media.
+    mVideoStartL = 0.0;
+    mVideoStartR = 0.0;
+
+    double tMin = 0.0;
+    double tMax = 1.0;
+    recomputeVideoScrubBounds(tMin, tMax);
+    mVideoCompositionT = tMin;
+    mVideoScrubValue = mVideoCompositionT;
+
+    recreateVideoTexture();
+    recreateVideoTextureB();
+    syncVideoDecodersToCompositionT();
+#endif
+}
+
+void App::openVideoFile(const std::string& filepath)
+{
+#if !defined(USE_VIDEO)
+    (void)filepath;
+    LOGW("Video playback is disabled in this build (USE_VIDEO).");
+#else
+    const int idx = addVideoPath(filepath);
+    if (idx < 0) {
+        return;
+    }
+    mVideoIndexL = idx;
+    // Keep existing right selection if valid & distinct; otherwise clear.
+    if (mVideoIndexR == mVideoIndexL) {
+        mVideoIndexR = -1;
+    }
+    openVideosFromSelection();
+#endif
+}
+
+void App::openVideoCompare(const std::string& leftPath, const std::string& rightPath)
+{
+#if !defined(USE_VIDEO)
+    (void)leftPath;
+    (void)rightPath;
+    LOGW("Video playback is disabled in this build (USE_VIDEO).");
+#else
+    const int idxL = addVideoPath(leftPath);
+    const int idxR = addVideoPath(rightPath);
+    if (idxL < 0 || idxR < 0 || idxL == idxR) {
+        return;
+    }
+    mVideoIndexL = idxL;
+    mVideoIndexR = idxR;
+    openVideosFromSelection();
+    LOGI("Video compare: left \"{}\", right \"{}\"", mVideoPaths[idxL], mVideoPaths[idxR]);
+#endif
+}
+
+void App::exitVideoMode()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    mVideoMode = false;
+    mVideoPlaying = false;
+    mVideoPlaybackTimeBank = 0.0;
+    mVideoStartL = mVideoStartR = 0.0;
+    mVideoCompositionT = 0.0;
+    mVideoSwapPresentationLR = false;
+    mVideoPathL.clear();
+    mVideoPathR.clear();
+    mVideoPaths.clear();
+    mVideoIndexL = -1;
+    mVideoIndexR = -1;
+    if (mVideoReader) {
+        mVideoReader->close();
+        mVideoReader.reset();
+    }
+    if (mVideoReaderB) {
+        mVideoReaderB->close();
+        mVideoReaderB.reset();
+    }
+    if (mVideoTexture != 0) {
+        glDeleteTextures(1, &mVideoTexture);
+        mVideoTexture = 0;
+    }
+    if (mVideoTextureB != 0) {
+        glDeleteTextures(1, &mVideoTextureB);
+        mVideoTextureB = 0;
+    }
+#endif
+}
+
+void App::recreateVideoTexture()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    if (mVideoTexture != 0) {
+        glDeleteTextures(1, &mVideoTexture);
+        mVideoTexture = 0;
+    }
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    glGenTextures(1, &mVideoTexture);
+    glBindTexture(GL_TEXTURE_2D, mVideoTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    const int w = mVideoReader->width();
+    const int h = mVideoReader->height();
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
+    glBindTexture(GL_TEXTURE_2D, 0);
+#endif
+}
+
+void App::recreateVideoTextureB()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    if (mVideoTextureB != 0) {
+        glDeleteTextures(1, &mVideoTextureB);
+        mVideoTextureB = 0;
+    }
+    if (!mVideoReaderB || !mVideoReaderB->isOpen()) {
+        return;
+    }
+    glGenTextures(1, &mVideoTextureB);
+    glBindTexture(GL_TEXTURE_2D, mVideoTextureB);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    const int w = mVideoReaderB->width();
+    const int h = mVideoReaderB->height();
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
+    glBindTexture(GL_TEXTURE_2D, 0);
+#endif
+}
+
+void App::uploadVideoTexture()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    if (mVideoTexture == 0 || !mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    glBindTexture(GL_TEXTURE_2D, mVideoTexture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mVideoReader->width(), mVideoReader->height(),
+        GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
+    glBindTexture(GL_TEXTURE_2D, 0);
+#endif
+}
+
+void App::uploadVideoTextureB()
+{
+#if !defined(USE_VIDEO)
+    return;
+#else
+    if (mVideoTextureB == 0 || !mVideoReaderB || !mVideoReaderB->isOpen()) {
+        return;
+    }
+    glBindTexture(GL_TEXTURE_2D, mVideoTextureB);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mVideoReaderB->width(), mVideoReaderB->height(),
+        GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
+    glBindTexture(GL_TEXTURE_2D, 0);
+#endif
+}
+
+void App::tickAndUploadVideoFrame(float deltaTime)
+{
+#if !defined(USE_VIDEO)
+    (void)deltaTime;
+    return;
+#else
+    if (!mVideoPlaying || !mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    if (videoCompareActive()) {
+        double tMin = 0.0;
+        double tMax = 1.0;
+        recomputeVideoScrubBounds(tMin, tMax);
+        mVideoCompositionT += static_cast<double>(deltaTime);
+        constexpr double kEndEps = 1.0 / 240.0;
+        if (mVideoCompositionT >= tMax - kEndEps) {
+            mVideoCompositionT = tMax;
+            mVideoPlaying = false;
+        }
+        clampVideoCompositionT();
+        syncVideoDecodersToCompositionT();
+        return;
+    }
+    double frameDur = mVideoReader->frameDurationSec();
+    if (frameDur < 1e-6 || frameDur > 1.0) {
+        frameDur = 1.0 / 30.0;
+    }
+    mVideoPlaybackTimeBank += static_cast<double>(deltaTime);
+    while (mVideoPlaybackTimeBank >= frameDur) {
+        mVideoPlaybackTimeBank -= frameDur;
+        if (!mVideoReader->decodeFrame()) {
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoPlaying = false;
+            break;
+        }
+        uploadVideoTexture();
+    }
+#endif
+}
+
+void App::renderVideoBlit(const ImGuiIO& io)
+{
+#if !defined(USE_VIDEO)
+    (void)io;
+    return;
+#else
+    if (!mVideoShaderReady || mVideoTexture == 0 || !mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    const Vec2f viewportSize = io.DisplaySize * io.DisplayFramebufferScale;
+    glViewport(0, 0, static_cast<GLsizei>(viewportSize.x), static_cast<GLsizei>(viewportSize.y));
+    glClearColor(0.45f, 0.55f, 0.6f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_DEPTH_TEST);
+
+    mVideoBlitShader.bind();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, mVideoTexture);
+    const bool cmp = videoCompareActive();
+    const float transportBarH = cmp ? 80.0f : 36.0f;
+    const float contentH =
+        io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
+    const Vec2f contentOrigin(0.0f, mToolbarHeight);
+    const Vec2f contentSize(io.DisplaySize.x, std::max(1.0f, contentH));
+
+    mVideoBlitShader.setUniform("uWindowSize", Vec2f(io.DisplaySize.x, io.DisplaySize.y));
+    mVideoBlitShader.setUniform("uContentOrigin", contentOrigin);
+    mVideoBlitShader.setUniform("uContentSize", contentSize);
+    if (cmp && mVideoTextureB != 0) {
+        mVideoBlitShader.setUniform("uCompareMode", 1);
+        mVideoBlitShader.setUniform("uVideo", 0);
+        mVideoBlitShader.setUniform("uVideoR", 1);
+        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+        // Presentation-only swap: bind textures/sizes according to what should appear on screen.
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, dispSwap ? mVideoTexture : mVideoTextureB);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, dispSwap ? mVideoTextureB : mVideoTexture);
+
+        const MFVideoReader* r0 = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+        const MFVideoReader* r1 = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+        mVideoBlitShader.setUniform("uVideoSize", Vec2f(static_cast<float>(r0->width()),
+            static_cast<float>(r0->height())));
+        mVideoBlitShader.setUniform("uVideoSizeR", Vec2f(static_cast<float>(r1->width()),
+            static_cast<float>(r1->height())));
+        mVideoBlitShader.setUniform("uSplitPos", mViewSplitPos);
+    } else {
+        mVideoBlitShader.setUniform("uCompareMode", 0);
+        mVideoBlitShader.setUniform("uVideo", 0);
+        mVideoBlitShader.setUniform("uVideoSize", Vec2f(static_cast<float>(mVideoReader->width()),
+            static_cast<float>(mVideoReader->height())));
+    }
+    mVideoBlitShader.drawTriangle();
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+#endif
+}
+
+void App::initVideoTransportBar(const ImGuiIO& io)
+{
+#if !defined(USE_VIDEO)
+    (void)io;
+    return;
+#else
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    const bool cmp = videoCompareActive();
+    const float barH = cmp ? 80.0f : 36.0f;
+    ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::Begin("VideoTransport", nullptr,
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar
+        | ImGuiWindowFlags_NoSavedSettings);
+
+    if (ImGui::Button(mVideoPlaying ? "Pause" : "Play")) {
+        mVideoPlaying ^= true;
+        mVideoPlaybackTimeBank = 0.0;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+        exitVideoMode();
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+    ImGui::SameLine();
+
+    if (cmp) {
+        const ImVec4 tintL(0.25f, 0.80f, 0.75f, 1.0f);  // teal
+        const ImVec4 tintR(0.95f, 0.55f, 0.20f, 1.0f);  // orange
+
+        double tMin = 0.0;
+        double tMax = 1.0;
+        recomputeVideoScrubBounds(tMin, tMax);
+
+        ImGui::SetNextItemWidth(std::max(120.0f, io.DisplaySize.x - 380.0f));
+        ImGui::PushID("videoscrubcmp");
+        const bool valueChanged =
+            ImGui::SliderScalar("##t", ImGuiDataType_Double, &mVideoScrubValue, &tMin, &tMax, "");
+
+        // Overlay each video's bounds onto the scrub bar so their relative alignment is visible.
+        // In composition time: media spans [mVideoStartX, mVideoStartX + durationX].
+        if (tMax > tMin) {
+            const ImVec2 rmin = ImGui::GetItemRectMin();
+            const ImVec2 rmax = ImGui::GetItemRectMax();
+            const float padY = 2.0f;
+            const float y0 = rmin.y + padY;
+            const float y1 = rmax.y - padY;
+            auto drawRange = [&](double a, double b, const ImVec4& tint) {
+                const double lo = (std::min)(a, b);
+                const double hi = (std::max)(a, b);
+                const double c0 = (std::max)(lo, tMin);
+                const double c1 = (std::min)(hi, tMax);
+                if (c1 <= c0) {
+                    return;
+                }
+                const float u0 = static_cast<float>((c0 - tMin) / (tMax - tMin));
+                const float u1 = static_cast<float>((c1 - tMin) / (tMax - tMin));
+                const float x0 = rmin.x + (rmax.x - rmin.x) * glm::clamp(u0, 0.0f, 1.0f);
+                const float x1 = rmin.x + (rmax.x - rmin.x) * glm::clamp(u1, 0.0f, 1.0f);
+                const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(tint.x, tint.y, tint.z, 0.22f));
+                const ImU32 edge = ImGui::ColorConvertFloat4ToU32(ImVec4(tint.x, tint.y, tint.z, 0.65f));
+                ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), fill, 2.0f);
+                ImGui::GetWindowDrawList()->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), edge, 2.0f);
+            };
+
+            const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+            const double dA = (mVideoReader) ? (std::max)(0.0, mVideoReader->durationSec()) : 0.0;
+            const double dB = (mVideoReaderB) ? (std::max)(0.0, mVideoReaderB->durationSec()) : 0.0;
+            // "Left/Right" colors follow what is visible on screen.
+            const double startLeft = dispSwap ? mVideoStartR : mVideoStartL;
+            const double durLeft = dispSwap ? dB : dA;
+            const double startRight = dispSwap ? mVideoStartL : mVideoStartR;
+            const double durRight = dispSwap ? dA : dB;
+            drawRange(startLeft, startLeft + durLeft, tintL);
+            drawRange(startRight, startRight + durRight, tintR);
+        }
+
+        const bool itemActive = ImGui::IsItemActive();
+        const bool itemActivated = ImGui::IsItemActivated();
+        const bool itemClicked = ImGui::IsItemClicked();
+        if (itemActive || itemActivated || valueChanged || itemClicked) {
+            mVideoCompositionT = mVideoScrubValue;
+            clampVideoCompositionT();
+            mVideoPlaybackTimeBank = 0.0;
+            syncVideoDecodersToCompositionT();
+            mVideoPlaying = false;
+        }
+        if (!itemActive) {
+            mVideoScrubValue = mVideoCompositionT;
+        }
+        ImGui::PopID();
+
+        ImGui::SameLine();
+        const double tShown = itemActive ? mVideoScrubValue : mVideoCompositionT;
+        char tBuf[32];
+        char maxBuf[32];
+        formatVideoHms(tShown, tBuf, sizeof tBuf);
+        formatVideoHms(tMax, maxBuf, sizeof maxBuf);
+        ImGui::Text("T %s / %s", tBuf, maxBuf);
+
+        ImGui::TextUnformatted("Offsets (composition time at media 0):");
+
+        static char sOffBufL[64] = "";
+        static char sOffBufR[64] = "";
+
+        auto offsetControl = [&](const char* label, double& v, double stepSec, const ImVec4& tint, char* buf,
+                                 size_t bufSize) -> bool {
+            bool changed = false;
+            ImGui::PushID(label);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(tint, "%s", label);
+            ImGui::SameLine();
+
+            // Tint controls by side (button + input background).
+            const ImVec4 btn = ImVec4(tint.x * 0.85f, tint.y * 0.85f, tint.z * 0.85f, 1.0f);
+            const ImVec4 btnHover = ImVec4(tint.x, tint.y, tint.z, 1.0f);
+            const ImVec4 btnActive = ImVec4(tint.x * 1.05f, tint.y * 1.05f, tint.z * 1.05f, 1.0f);
+            const ImVec4 frame = ImVec4(tint.x * 0.20f, tint.y * 0.20f, tint.z * 0.20f, 0.85f);
+            ImGui::PushStyleColor(ImGuiCol_Button, btn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, btnActive);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, frame);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frame);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frame);
+
+            auto stripUnitsInPlace = [](char* s) {
+                if (!s) {
+                    return;
+                }
+                // Truncate at first non-number-ish char (keeps sign, decimal, exponent).
+                for (char* p = s; *p; ++p) {
+                    const char c = *p;
+                    const bool ok = (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
+                    if (!ok) {
+                        *p = '\0';
+                        break;
+                    }
+                }
+            };
+
+            if (ImGui::SmallButton("<")) {
+                v -= stepSec;
+                changed = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(92.0f);
+            {
+                const ImGuiID vId = ImGui::GetID("##v");
+                const bool wasActive = (ImGui::GetActiveID() == vId);
+                if (!wasActive) {
+                    std::snprintf(buf, bufSize, "%.3f", v);
+                }
+
+                ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
+                const bool enter = ImGui::InputText("##v", buf, bufSize, flags);
+                const bool nowActive = ImGui::IsItemActive();
+                const bool activated = ImGui::IsItemActivated();
+                const bool deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+
+                if (activated) {
+                    stripUnitsInPlace(buf);
+                }
+
+                if (enter || deactivatedAfterEdit) {
+                    char* endp = nullptr;
+                    const double parsed = std::strtod(buf, &endp);
+                    if (endp != buf) {
+                        v = parsed;
+                        changed = true;
+                    }
+                }
+
+                if (!nowActive) {
+                    std::snprintf(buf, bufSize, "%.3f", v);
+
+                    // Visual-only unit suffix, not part of the input buffer.
+                    const ImVec2 rmin = ImGui::GetItemRectMin();
+                    const ImVec2 rmax = ImGui::GetItemRectMax();
+                    const char* unit = "s";
+                    const ImVec2 unitSz = ImGui::CalcTextSize(unit);
+                    const float padX = 6.0f;
+                    const float x = rmax.x - unitSz.x - padX;
+                    const float y = rmin.y + (rmax.y - rmin.y - unitSz.y) * 0.5f;
+                    const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::GetWindowDrawList()->AddText(ImVec2(x, y), col, unit);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(">")) {
+                v += stepSec;
+                changed = true;
+            }
+
+            ImGui::PopStyleColor(6);
+            ImGui::PopID();
+            return changed;
+        };
+
+        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+        const double stepA = (mVideoReader && mVideoReader->frameDurationSec() > 0.0) ? mVideoReader->frameDurationSec() : 0.05;
+        const double stepB =
+            (mVideoReaderB && mVideoReaderB->frameDurationSec() > 0.0) ? mVideoReaderB->frameDurationSec() : 0.05;
+        double& startLeft = dispSwap ? mVideoStartR : mVideoStartL;
+        double& startRight = dispSwap ? mVideoStartL : mVideoStartR;
+        const double stepLeft = dispSwap ? stepB : stepA;
+        const double stepRight = dispSwap ? stepA : stepB;
+
+        const bool changedL = offsetControl("L", startLeft, stepLeft, tintL, sOffBufL, sizeof sOffBufL);
+        ImGui::SameLine();
+        const bool changedR = offsetControl("R", startRight, stepRight, tintR, sOffBufR, sizeof sOffBufR);
+        if (changedL || changedR) {
+            clampVideoCompositionT();
+            syncVideoDecodersToCompositionT();
+            mVideoPlaying = false;
+        }
+    } else {
+        const double pos = mVideoReader->positionSec();
+        const double metaDur = mVideoReader->durationSec();
+        double durTotal = metaDur;
+        if (durTotal <= 0.001) {
+            durTotal = std::max(60.0, pos + 5.0);
+        }
+        double sliderMaxSec = std::max({durTotal, pos + 0.01, 0.25});
+        if (metaDur > 0.001) {
+            const double frameDur = mVideoReader->frameDurationSec();
+            const double endSlack = std::max(frameDur * 3.0, 0.1);
+            const double seekableEnd = std::max(0.0, metaDur - endSlack);
+            sliderMaxSec = std::max({seekableEnd, pos + 0.01, 0.25});
+        }
+        const double sliderMinSec = 0.0;
+
+        ImGui::SetNextItemWidth(std::max(120.0f, io.DisplaySize.x - 280.0f));
+        ImGui::PushID("videoscrub");
+        const bool valueChanged =
+            ImGui::SliderScalar("##t", ImGuiDataType_Double, &mVideoScrubValue, &sliderMinSec, &sliderMaxSec, "");
+        const bool itemActive = ImGui::IsItemActive();
+        const bool itemActivated = ImGui::IsItemActivated();
+        const bool itemClicked = ImGui::IsItemClicked();
+        if (itemActive || itemActivated || valueChanged || itemClicked) {
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoReader->seek(mVideoScrubValue);
+            mVideoReader->decodeFrameThrough(mVideoScrubValue);
+            uploadVideoTexture();
+            mVideoPlaying = false;
+        }
+        if (!itemActive) {
+            mVideoScrubValue = mVideoReader->positionSec();
+        }
+        ImGui::PopID();
+
+        ImGui::SameLine();
+        const double tDisplayed = itemActive ? mVideoScrubValue : mVideoReader->positionSec();
+        char posBuf[32];
+        char durBuf[32];
+        formatVideoHms(tDisplayed, posBuf, sizeof posBuf);
+        formatVideoHms(durTotal, durBuf, sizeof durBuf);
+        if (metaDur > 0.001) {
+            ImGui::Text("%s / %s", posBuf, durBuf);
+        } else {
+            ImGui::Text("%s / ?", posBuf);
+        }
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+#endif
 }
 
 }  // namespace baktsiu

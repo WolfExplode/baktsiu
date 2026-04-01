@@ -1,9 +1,10 @@
-﻿#include <iostream>
+#include <iostream>
 #include <string>
 #include <vector>
 
 #include "app.h"
 #include "docopt/docopt.h"
+#include "mf_video_reader.h"
 
 static const char USAGE[] =
 R"(Bak-Tsiu, examining every image details.
@@ -48,7 +49,24 @@ int main(int argc, char** argv)
     if (app.initialize(u8"目睭 Bak Tsiu", 1280, 720))
     {
         if (args["<name>"]) {
-            app.importImageFiles(args["<name>"].asStringList(), true);
+            std::vector<std::string> names = args["<name>"].asStringList();
+            std::vector<std::string> imagePaths;
+            std::vector<std::string> videoPaths;
+            for (const std::string& n : names) {
+                if (baktsiu::MFVideoReader::isSupportedExtension(n)) {
+                    videoPaths.push_back(n);
+                } else {
+                    imagePaths.push_back(n);
+                }
+            }
+            if (videoPaths.size() >= 2) {
+                app.openVideoCompare(videoPaths[0], videoPaths[1]);
+            } else if (videoPaths.size() == 1) {
+                app.openVideoFile(videoPaths[0]);
+            }
+            if (!imagePaths.empty()) {
+                app.importImageFiles(imagePaths, true);
+            }
         }
 
         baktsiu::CompositeFlags composition = baktsiu::CompositeFlags::Top;

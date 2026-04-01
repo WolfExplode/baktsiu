@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "image.h"
+#include "mf_video_reader.h"
 #include "shader.h"
 #include "texture.h"
 #include "texture_pool.h"
@@ -113,6 +114,10 @@ public:
     void    importImageFiles(const std::vector<std::string>& filepathArray, 
                 bool recordAction, std::vector<uint16_t>* imageIdxArray = nullptr);
 
+    void    openVideoFile(const std::string& filepath);
+
+    void    openVideoCompare(const std::string& leftPath, const std::string& rightPath);
+
     void    run(CompositeFlags initFlags = CompositeFlags::Top);
 
     void    release();
@@ -212,7 +217,36 @@ private:
 
     void    toggleSideBySideView();
 
-private:
+    void    exitVideoMode();
+
+    int     addVideoPath(const std::string& filepath);
+
+    void    openVideosFromSelection();
+
+    void    initVideoTransportBar(const ImGuiIO& io);
+
+    void    tickAndUploadVideoFrame(float deltaTime);
+
+    void    renderVideoBlit(const ImGuiIO& io);
+
+    void    recreateVideoTexture();
+
+    void    uploadVideoTexture();
+
+    bool    videoCompareActive() const;
+
+    void    recomputeVideoScrubBounds(double& outMin, double& outMax) const;
+
+    void    clampVideoCompositionT();
+
+    void    syncVideoDecodersToCompositionT();
+
+    void    swapVideoSides();
+
+    void    recreateVideoTextureB();
+
+    void    uploadVideoTextureB();
+
     using ImageUPtr = std::unique_ptr<Image>;
 
     std::vector<ImageUPtr>      mImageList;
@@ -281,6 +315,33 @@ private:
     bool        mShowPixelMarker = false;
     bool        mSupportComputeShader = false;
     bool        mUpdateImageSelection = false;
+
+    bool        mVideoMode = false;
+    bool        mVideoPlaying = false;
+    double      mVideoPlaybackTimeBank = 0.0;
+    double      mVideoScrubValue = 0.0;
+    std::unique_ptr<MFVideoReader> mVideoReader;
+    std::unique_ptr<MFVideoReader> mVideoReaderB;
+    std::vector<std::string> mVideoPaths;
+    int         mVideoIndexL = -1;
+    int         mVideoIndexR = -1;
+    std::string mVideoPathL;
+    std::string mVideoPathR;
+    GLuint      mVideoTexture = 0;
+    GLuint      mVideoTextureB = 0;
+    double      mVideoCompositionT = 0.0;
+    double      mVideoStartL = 0.0;
+    double      mVideoStartR = 0.0;
+    // Presentation-only left/right swap for instant switching while playing.
+    // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
+    // remain in their original slots (mVideoReader/mVideoReaderB).
+    bool        mVideoSwapPresentationLR = false;
+    Shader      mVideoBlitShader;
+    bool        mVideoShaderReady = false;
+
+#if defined(_WIN32) && defined(USE_VIDEO)
+    bool        mVideoComInitialized = false;
+#endif
 };
 
 }  // namespace baktsiu

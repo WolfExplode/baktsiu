@@ -20,8 +20,8 @@ BUILD_SHARED_LIBS:BOOL=OFF
 //Path to a program.
 CMAKE_AR:FILEPATH=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.40.33807/bin/Hostx64/x64/lib.exe
 
-//Choose Release or Debug
-CMAKE_BUILD_TYPE:STRING=Release
+//No help, variable specified on the command line.
+CMAKE_BUILD_TYPE:UNINITIALIZED=Release
 
 //Semicolon separated list of supported configuration types, only
 // supports Debug, Release, MinSizeRel, and RelWithDebInfo, anything
@@ -374,6 +374,9 @@ USE_NVTX:BOOL=OFF
 
 //Use OpenEXR
 USE_OPENEXR:BOOL=OFF
+
+//Windows Media Foundation video playback prototype
+USE_VIDEO:BOOL=ON
 
 // 
 VERSION:STRING=0.2.1

@@ -7,6 +7,11 @@ set(VERSION "0.2.1" CACHE STRING " " FORCE)
 option(USE_NVTX "Use NVidia Tool Extensions" OFF)
 option(USE_OPENEXR "Use OpenEXR" OFF)
 option(EMBED_SHADERS "Embed shaders into binary" ON)
+if(WIN32)
+    option(USE_VIDEO "Windows Media Foundation video playback prototype" ON)
+else()
+    option(USE_VIDEO "Windows Media Foundation video playback prototype" OFF)
+endif()
 
 if(USE_OPENEXR AND NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/ext/openexr/OpenEXR")
     message(FATAL_ERROR "Missing dependent thrid-party submodules (like OpenEXR)!"
