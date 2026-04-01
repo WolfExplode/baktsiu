@@ -74,25 +74,37 @@ std::wstring utf8ToWide(const std::string& utf8)
     return w;
 }
 
-std::wstring pathToFileUrl(const std::string& utf8Path)
+std::wstring utf8PathToFullPathWide(const std::string& utf8Path)
 {
     std::wstring wpath = utf8ToWide(utf8Path);
     if (wpath.empty() && !utf8Path.empty()) {
         return L"";
     }
-    wchar_t full[32768];
-    DWORD len = GetFullPathNameW(wpath.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr);
-    if (len == 0 || len >= std::size(full)) {
-        if (wcsncpy_s(full, wpath.c_str(), _TRUNCATE) != 0) {
+    wchar_t buf[32768];
+    DWORD len = GetFullPathNameW(wpath.c_str(), static_cast<DWORD>(std::size(buf)), buf, nullptr);
+    if (len == 0 || len >= std::size(buf)) {
+        if (wpath.empty()) {
             return L"";
         }
+        if (wcsncpy_s(buf, wpath.c_str(), _TRUNCATE) != 0) {
+            return L"";
+        }
+    }
+    return std::wstring(buf);
+}
+
+std::wstring pathToFileUrl(const std::string& utf8Path)
+{
+    std::wstring full = utf8PathToFullPathWide(utf8Path);
+    if (full.empty() && !utf8Path.empty()) {
+        return L"";
     }
 
     // Raw file:///C:/.../name with spaces breaks MFCreateSourceReaderFromURL (0x80070002). Let the
     // shell API build a proper file: URL, or percent-encode UTF-8 as fallback.
     wchar_t shellUrl[32768];
     DWORD shellUrlChars = static_cast<DWORD>(std::size(shellUrl));
-    const HRESULT hrPath = UrlCreateFromPathW(full, shellUrl, &shellUrlChars, 0);
+    const HRESULT hrPath = UrlCreateFromPathW(full.c_str(), shellUrl, &shellUrlChars, 0);
     if (SUCCEEDED(hrPath) && shellUrlChars > 1u) {
         return std::wstring(shellUrl);
     }
@@ -572,11 +584,24 @@ bool MFVideoReader::open(const std::string& utf8Path)
         return false;
     }
 
-    std::wstring url = pathToFileUrl(utf8Path);
     IMFSourceReader* reader = nullptr;
-    HRESULT hr = MFCreateSourceReaderFromURL(url.c_str(), nullptr, &reader);
-    if (FAILED(hr)) {
-        LOGE("MFCreateSourceReaderFromURL failed: 0x{:x}", static_cast<unsigned>(hr));
+    HRESULT hr = E_FAIL;
+    const std::wstring fullWide = utf8PathToFullPathWide(utf8Path);
+    if (!fullWide.empty()) {
+        IMFByteStream* byteStream = nullptr;
+        hr = MFCreateFile(MF_ACCESSMODE_READ, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_FILEFLAGS_NONE,
+            fullWide.c_str(), &byteStream);
+        if (SUCCEEDED(hr) && byteStream) {
+            hr = MFCreateSourceReaderFromByteStream(byteStream, nullptr, &reader);
+            byteStream->Release();
+        }
+    }
+    if (FAILED(hr) || !reader) {
+        const std::wstring url = pathToFileUrl(utf8Path);
+        hr = MFCreateSourceReaderFromURL(url.c_str(), nullptr, &reader);
+    }
+    if (FAILED(hr) || !reader) {
+        LOGE("MFCreateSourceReader (file/URL) failed: 0x{:x}", static_cast<unsigned>(hr));
         mfStartupRelease();
         return false;
     }
@@ -642,12 +667,9 @@ bool MFVideoReader::open(const std::string& utf8Path)
     }
 
     m_durationSec = readPresentationDuration(reader);
-    if (m_durationSec <= 0.001) {
-        const double probed = probeVideoEndSec(reader);
-        if (probed > 0.001) {
-            m_durationSec = probed;
-        }
-    }
+    m_lazyDurationProbeDone = false;
+    // Missing MF_PD_DURATION is common on MP4; probing here reads the entire stream and blocks open.
+    // lazyProbePresentationDuration() runs later (after a short UI grace period).
 
     m_rgba.resize(static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u);
 
@@ -679,12 +701,32 @@ void MFVideoReader::close()
     m_pixelAspectDen = 1;
     m_durationSec = m_positionSec = 0.0;
     m_frameDurationSec = 1.0 / 30.0;
+    m_lazyDurationProbeDone = false;
     m_rgba.clear();
 }
 
 bool MFVideoReader::isOpen() const
 {
     return m_reader != nullptr;
+}
+
+bool MFVideoReader::lazyProbePresentationDuration()
+{
+    if (!m_reader || m_lazyDurationProbeDone) {
+        return false;
+    }
+    if (m_durationSec > 0.001) {
+        m_lazyDurationProbeDone = true;
+        return false;
+    }
+    m_lazyDurationProbeDone = true;
+    IMFSourceReader* reader = static_cast<IMFSourceReader*>(m_reader);
+    const double probed = probeVideoEndSec(reader);
+    if (probed > 0.001) {
+        m_durationSec = probed;
+    }
+    // probeVideoEndSec leaves the reader at t=0; caller must resync to the current composition time.
+    return true;
 }
 
 void MFVideoReader::seek(double seconds)
@@ -937,6 +979,11 @@ bool MFVideoReader::decodeFrame()
 }
 
 bool MFVideoReader::decodeFrameThrough(double)
+{
+    return false;
+}
+
+bool MFVideoReader::lazyProbePresentationDuration()
 {
     return false;
 }

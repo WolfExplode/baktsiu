@@ -42,6 +42,11 @@ public:
 
     const uint8_t* rgbaBuffer() const { return m_rgba.data(); }
 
+    // If presentation duration was missing at open(), probe the stream once (expensive). Call from the
+    // main thread after the first frames are visible. Returns true if the reader was rewound to t=0
+    // (caller should seek/decode back to the current UI time, e.g. syncVideoDecodersToCompositionT).
+    bool lazyProbePresentationDuration();
+
 private:
     friend struct MFVideoReaderDecodeDetail;
     void* m_reader = nullptr;  // IMFSourceReader* (Win32 + USE_VIDEO only)
@@ -55,6 +60,7 @@ private:
     double m_positionSec = 0.0;
     double m_frameDurationSec = 1.0 / 30.0;
     bool m_outputRgb32 = true;
+    bool m_lazyDurationProbeDone = false;
 
     std::vector<uint8_t> m_rgba;
 };

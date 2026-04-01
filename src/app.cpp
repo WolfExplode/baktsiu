@@ -710,6 +710,20 @@ void App::run(CompositeFlags initFlags)
         }
 #if defined(USE_VIDEO)
         else {
+            bool videoReaderDidRewind = false;
+            if (mVideoLazyDurationGraceFrames > 0) {
+                --mVideoLazyDurationGraceFrames;
+            } else {
+                if (mVideoReader) {
+                    videoReaderDidRewind |= mVideoReader->lazyProbePresentationDuration();
+                }
+                if (videoCompareActive() && mVideoReaderB) {
+                    videoReaderDidRewind |= mVideoReaderB->lazyProbePresentationDuration();
+                }
+                if (videoReaderDidRewind) {
+                    syncVideoDecodersToCompositionT();
+                }
+            }
             tickAndUploadVideoFrame(io.DeltaTime);
             initVideoTransportBar(io);
             if (mShowImageNameOverlay) {
@@ -2939,6 +2953,7 @@ void App::openVideosFromSelection()
         // Ensure compare decoder is actually open when we expect it.
         if (idxR < 0 || videoCompareActive()) {
             syncVideoDecodersToCompositionT();
+            mVideoLazyDurationGraceFrames = 0;
             return;
         }
     }
@@ -2974,6 +2989,7 @@ void App::openVideosFromSelection()
                     mVideoSwapPresentationLR = true;
                 }
                 syncVideoDecodersToCompositionT();
+                mVideoLazyDurationGraceFrames = 0;
                 return;
             }
         }
@@ -3038,6 +3054,15 @@ void App::openVideosFromSelection()
     recreateVideoTexture();
     recreateVideoTextureB();
     syncVideoDecodersToCompositionT();
+
+    mVideoLazyDurationGraceFrames = 0;
+    if (mVideoReader && mVideoReader->isOpen() && mVideoReader->durationSec() <= 0.001) {
+        mVideoLazyDurationGraceFrames = 1;
+    }
+    if (videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()
+        && mVideoReaderB->durationSec() <= 0.001) {
+        mVideoLazyDurationGraceFrames = 1;
+    }
 #endif
 }
 
@@ -3119,6 +3144,7 @@ void App::exitVideoMode()
 #else
     mVideoMode = false;
     mVideoPlaying = false;
+    mVideoLazyDurationGraceFrames = 0;
     mVideoPlaybackTimeBank = 0.0;
     mVideoStartL = mVideoStartR = 0.0;
     mVideoCompositionT = 0.0;
