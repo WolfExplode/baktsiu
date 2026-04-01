@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <shlwapi.h>
 
 #include <mfapi.h>
 #include <mfidl.h>
@@ -55,30 +56,80 @@ std::wstring utf8ToWide(const std::string& utf8)
     if (utf8.empty()) {
         return L"";
     }
-    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    // Prefer UTF-8 (import dialog / drag-drop / wmain argv). Windows narrow argv is often the
+    // system ANSI code page — fall back so paths from CreateProcess still open correctly.
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.c_str(), -1, nullptr, 0);
+    UINT cp = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    if (n <= 0) {
+        cp = CP_ACP;
+        flags = 0;
+        n = MultiByteToWideChar(cp, flags, utf8.c_str(), -1, nullptr, 0);
+    }
     if (n <= 0) {
         return L"";
     }
     std::wstring w(static_cast<size_t>(n - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &w[0], n);
+    MultiByteToWideChar(cp, flags, utf8.c_str(), -1, &w[0], n);
     return w;
 }
 
 std::wstring pathToFileUrl(const std::string& utf8Path)
 {
     std::wstring wpath = utf8ToWide(utf8Path);
-    wchar_t full[4096];
+    if (wpath.empty() && !utf8Path.empty()) {
+        return L"";
+    }
+    wchar_t full[32768];
     DWORD len = GetFullPathNameW(wpath.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr);
     if (len == 0 || len >= std::size(full)) {
-        wcsncpy_s(full, wpath.c_str(), _TRUNCATE);
+        if (wcsncpy_s(full, wpath.c_str(), _TRUNCATE) != 0) {
+            return L"";
+        }
     }
-    std::wstring path(full);
-    for (auto& c : path) {
+
+    // Raw file:///C:/.../name with spaces breaks MFCreateSourceReaderFromURL (0x80070002). Let the
+    // shell API build a proper file: URL, or percent-encode UTF-8 as fallback.
+    wchar_t shellUrl[32768];
+    DWORD shellUrlChars = static_cast<DWORD>(std::size(shellUrl));
+    const HRESULT hrPath = UrlCreateFromPathW(full, shellUrl, &shellUrlChars, 0);
+    if (SUCCEEDED(hrPath) && shellUrlChars > 1u) {
+        return std::wstring(shellUrl);
+    }
+
+    std::wstring pathFwd(full);
+    for (auto& c : pathFwd) {
         if (c == L'\\') {
             c = L'/';
         }
     }
-    return L"file:///" + path;
+    const int nU8 = WideCharToMultiByte(CP_UTF8, 0, pathFwd.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (nU8 <= 1) {
+        return L"";
+    }
+    std::string u8(static_cast<size_t>(nU8 - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, pathFwd.c_str(), -1, &u8[0], nU8, nullptr, nullptr);
+
+    std::string enc;
+    enc.reserve(u8.size() * 3u);
+    static const char* kHex = "0123456789ABCDEF";
+    for (unsigned char ch : u8) {
+        if (std::isalnum(ch) != 0 || ch == '-' || ch == '.' || ch == '_' || ch == '~' || ch == '/'
+            || ch == ':') {
+            enc += static_cast<char>(ch);
+        } else {
+            enc += '%';
+            enc += kHex[ch >> 4];
+            enc += kHex[ch & 0xFu];
+        }
+    }
+    std::wstring out;
+    out.reserve(8u + enc.size());
+    out.append(L"file:///");
+    for (char c : enc) {
+        out += static_cast<wchar_t>(static_cast<unsigned char>(c));
+    }
+    return out;
 }
 
 bool configureOutputType(IMFSourceReader* reader, const GUID& subtype)
@@ -486,6 +537,18 @@ MFVideoReader::~MFVideoReader()
     close();
 }
 
+float MFVideoReader::displayWidthForAspect() const
+{
+    const int den = (m_pixelAspectDen > 0) ? m_pixelAspectDen : 1;
+    const int num = (m_pixelAspectNum > 0) ? m_pixelAspectNum : 1;
+    return static_cast<float>(m_width) * static_cast<float>(num) / static_cast<float>(den);
+}
+
+float MFVideoReader::displayHeightForAspect() const
+{
+    return static_cast<float>(m_height);
+}
+
 bool MFVideoReader::isSupportedExtension(const std::string& filepath)
 {
     static const char* kExt[] = {".mp4", ".mov", ".wmv", ".avi", ".mkv", ".webm", ".m4v"};
@@ -520,6 +583,23 @@ bool MFVideoReader::open(const std::string& utf8Path)
 
     m_reader = reader;
 
+    m_pixelAspectNum = 1;
+    m_pixelAspectDen = 1;
+    IMFMediaType* nativeType = nullptr;
+    if (SUCCEEDED(reader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nativeType))
+        && nativeType) {
+        UINT64 par = 0;
+        if (SUCCEEDED(nativeType->GetUINT64(MF_MT_PIXEL_ASPECT_RATIO, &par))) {
+            const UINT32 n = static_cast<UINT32>(par >> 32);
+            const UINT32 d = static_cast<UINT32>(par & 0xffffffffu);
+            if (n > 0u && d > 0u) {
+                m_pixelAspectNum = static_cast<int>(n);
+                m_pixelAspectDen = static_cast<int>(d);
+            }
+        }
+        nativeType->Release();
+    }
+
     if (!configureOutputType(reader, MFVideoFormat_RGB32)) {
         if (!configureOutputType(reader, MFVideoFormat_NV12)) {
             LOGE("Could not set video output type (RGB32/NV12)");
@@ -535,6 +615,23 @@ bool MFVideoReader::open(const std::string& utf8Path)
         LOGE("Could not read video dimensions");
         close();
         return false;
+    }
+
+    if (m_pixelAspectNum == 1 && m_pixelAspectDen == 1) {
+        IMFMediaType* curType = nullptr;
+        if (SUCCEEDED(reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &curType))
+            && curType) {
+            UINT64 par = 0;
+            if (SUCCEEDED(curType->GetUINT64(MF_MT_PIXEL_ASPECT_RATIO, &par))) {
+                const UINT32 n = static_cast<UINT32>(par >> 32);
+                const UINT32 d = static_cast<UINT32>(par & 0xffffffffu);
+                if (n > 0u && d > 0u) {
+                    m_pixelAspectNum = static_cast<int>(n);
+                    m_pixelAspectDen = static_cast<int>(d);
+                }
+            }
+            curType->Release();
+        }
     }
 
     constexpr int kMaxVideoDim = 8192;
@@ -578,6 +675,8 @@ void MFVideoReader::close()
     m_reader = nullptr;
 #endif
     m_width = m_height = m_strideBytes = 0;
+    m_pixelAspectNum = 1;
+    m_pixelAspectDen = 1;
     m_durationSec = m_positionSec = 0.0;
     m_frameDurationSec = 1.0 / 30.0;
     m_rgba.clear();
@@ -801,9 +900,23 @@ bool MFVideoReader::open(const std::string&)
     return false;
 }
 
+float MFVideoReader::displayWidthForAspect() const
+{
+    const int den = (m_pixelAspectDen > 0) ? m_pixelAspectDen : 1;
+    const int num = (m_pixelAspectNum > 0) ? m_pixelAspectNum : 1;
+    return static_cast<float>(m_width) * static_cast<float>(num) / static_cast<float>(den);
+}
+
+float MFVideoReader::displayHeightForAspect() const
+{
+    return static_cast<float>(m_height);
+}
+
 void MFVideoReader::close()
 {
     m_width = m_height = 0;
+    m_pixelAspectNum = 1;
+    m_pixelAspectDen = 1;
     m_durationSec = m_positionSec = 0.0;
     m_frameDurationSec = 1.0 / 30.0;
     m_rgba.clear();

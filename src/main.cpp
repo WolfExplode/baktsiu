@@ -1,10 +1,20 @@
-#include <iostream>
 #include <string>
 #include <vector>
 
 #include "app.h"
 #include "docopt/docopt.h"
 #include "mf_video_reader.h"
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <shellapi.h>
+#include <windows.h>
+#endif
 
 static const char USAGE[] =
 R"(Bak-Tsiu, examining every image details.
@@ -20,17 +30,31 @@ R"(Bak-Tsiu, examining every image details.
       --version     Show version.
 )";
 
+#if defined(_WIN32)
+static std::string wideArgToUtf8(const wchar_t* w)
+{
+    if (!w) {
+        return {};
+    }
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) {
+        return {};
+    }
+    std::string out(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &out[0], n, nullptr, nullptr);
+    return out;
+}
+#endif
 
-int main(int argc, char** argv)
+static int runMain(std::vector<std::string> argList)
 {
     baktsiu::App app;
-    std::vector<std::string> argList = { argv + 1, argv + argc };
 
 #ifdef __APPLE__
     // If we launch from finder, there might be a "-psn" argument represents
     // a unique process serial number. We have to remove it before we parse
     // arguments with docopt.
-    for (auto iter = argList.begin(); iter != argList.end(); ++iter) {   
+    for (auto iter = argList.begin(); iter != argList.end(); ++iter) {
         if (iter->find("-psn") == 0) {
             argList.erase(iter);
             break;
@@ -38,16 +62,13 @@ int main(int argc, char** argv)
     }
 #endif
 
-// return 0;
-
     constexpr bool showHelpWhenRequest = true;
     PushRangeMarker("Parse Option");
-    std::map<std::string, docopt::value> args
-        = docopt::docopt(USAGE, argList, showHelpWhenRequest, "Bak-Tsiu v" VERSION);
+    std::map<std::string, docopt::value> args =
+        docopt::docopt(USAGE, argList, showHelpWhenRequest, "Bak-Tsiu v" VERSION);
     PopRangeMarker();
 
-    if (app.initialize(u8"目睭 Bak Tsiu", 1280, 720))
-    {
+    if (app.initialize(u8"目睭 Bak Tsiu", 1280, 720)) {
         if (args["<name>"]) {
             std::vector<std::string> names = args["<name>"].asStringList();
             std::vector<std::string> imagePaths;
@@ -59,10 +80,8 @@ int main(int argc, char** argv)
                     imagePaths.push_back(n);
                 }
             }
-            if (videoPaths.size() >= 2) {
-                app.openVideoCompare(videoPaths[0], videoPaths[1]);
-            } else if (videoPaths.size() == 1) {
-                app.openVideoFile(videoPaths[0]);
+            if (!videoPaths.empty()) {
+                app.openVideoPaths(videoPaths);
             }
             if (!imagePaths.empty()) {
                 app.importImageFiles(imagePaths, true);
@@ -82,4 +101,25 @@ int main(int argc, char** argv)
     }
 
     return 1;
+}
+
+int main(int argc, char** argv)
+{
+#if defined(_WIN32)
+    (void)argc;
+    (void)argv;
+    int wargc = 0;
+    wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (!wargv) {
+        return 1;
+    }
+    std::vector<std::string> argList;
+    for (int i = 1; i < wargc; ++i) {
+        argList.push_back(wideArgToUtf8(wargv[i]));
+    }
+    LocalFree(wargv);
+    return runMain(std::move(argList));
+#else
+    return runMain({ argv + 1, argv + argc });
+#endif
 }

@@ -69,7 +69,7 @@ source_group("External Files\\docopt" FILES ${DOCOPT_SRC_FILES})
 
 set(VIDEO_LIBS "")
 if(WIN32 AND USE_VIDEO)
-    list(APPEND VIDEO_LIBS mfplat mfreadwrite mfuuid strmiids ole32 propsys)
+    list(APPEND VIDEO_LIBS mfplat mfreadwrite mfuuid strmiids ole32 propsys Shlwapi)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS})

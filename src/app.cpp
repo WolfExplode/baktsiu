@@ -1122,13 +1122,36 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
 void App::updateImagePairFromPressedKeys()
 {
 #if defined(USE_VIDEO)
-    // In video compare mode, reuse the same key bindings as image compare:
+    // Video mode:
+    // - Left/Right arrow: jump ±5s (single or compare composition time), like many players
+    // - ',' / '.': ±1 frame (YouTube-style)
+    // - Ctrl+Shift+Left/Right arrow or Ctrl+Shift+L/R or A/D: cycle media list (compare), like image A/D
     // - Up / X: swap sides
-    // - Left/A, Right/D: cycle the left selection (keep right distinct when possible)
     if (mVideoMode) {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.WantTextInput) {
+            return;
+        }
+
+        const bool arrowLeft = ImGui::IsKeyPressed(0x107);   // Left
+        const bool arrowRight = ImGui::IsKeyPressed(0x106);  // Right
+        const bool keyComma = ImGui::IsKeyPressed(0x2C);    // ','
+        const bool keyPeriod = ImGui::IsKeyPressed(0x2E);  // '.'
+        const bool listMod = io.KeyCtrl && io.KeyShift;
+        if (mVideoReader && mVideoReader->isOpen() && (keyComma || keyPeriod)) {
+            stepVideoScrubOneFrame(keyPeriod ? 1 : -1);
+            return;
+        }
+        if (mVideoReader && mVideoReader->isOpen() && (arrowLeft || arrowRight) && !listMod) {
+            stepVideoScrubFiveSeconds(arrowRight ? 1 : -1);
+            return;
+        }
+
         const bool isSwap = ImGui::IsKeyPressed(0x109) || ImGui::IsKeyPressed(0x58);  // Up arrow or 'x'
-        const bool isNext = ImGui::IsKeyPressed(0x106) || ImGui::IsKeyPressed(0x44);  // Right arrow or 'd'
-        const bool isPrev = ImGui::IsKeyPressed(0x107) || ImGui::IsKeyPressed(0x41);  // Left arrow or 'a'
+        const bool isNext = (arrowRight && listMod) || (listMod && ImGui::IsKeyPressed(0x52))  // R
+            || ImGui::IsKeyPressed(0x44);                                                  // D
+        const bool isPrev =
+            (arrowLeft && listMod) || (listMod && ImGui::IsKeyPressed(0x4C)) || ImGui::IsKeyPressed(0x41);  // L, A
         const int n = static_cast<int>(mVideoPaths.size());
         if (n >= 2 && (isSwap || isNext || isPrev)) {
             if (isSwap) {
@@ -1982,6 +2005,21 @@ void    App::initHomeWindow(const char* name)
                 ImGui::Text("D or Right Arrow");
                 ImGui::Text("A or Left Arrow");
                 ImGui::Text("X or Up Arrow");
+#if defined(USE_VIDEO)
+                ImGui::NextColumn();
+                ImGui::Separator();
+                ImGui::Text("Video: jump ±5 seconds");
+                ImGui::NextColumn();
+                ImGui::Text("Left / Right Arrow");
+                ImGui::NextColumn();
+                ImGui::Text("Video: frame step (, / .)");
+                ImGui::NextColumn();
+                ImGui::Text(",  .");
+                ImGui::NextColumn();
+                ImGui::Text("Video: next/prev in media list");
+                ImGui::NextColumn();
+                ImGui::Text("Ctrl+Shift+Left/Right\nor Ctrl+Shift+L/R, or A/D");
+#endif
                 //ImGui::NextColumn();
 
                 ImGui::Columns(1);
@@ -2729,6 +2767,105 @@ void App::syncVideoDecodersToCompositionT()
 #endif
 }
 
+void App::stepVideoScrubFiveSeconds(int direction)
+{
+#if !defined(USE_VIDEO)
+    (void)direction;
+    return;
+#else
+    if (!mVideoReader || !mVideoReader->isOpen() || direction == 0) {
+        return;
+    }
+    constexpr double kJumpSec = 5.0;
+    mVideoPlaying = false;
+    mVideoPlaybackTimeBank = 0.0;
+    if (videoCompareActive()) {
+        mVideoCompositionT += static_cast<double>(direction) * kJumpSec;
+        clampVideoCompositionT();
+        syncVideoDecodersToCompositionT();
+        mVideoScrubValue = mVideoCompositionT;
+        return;
+    }
+    const double pos = mVideoReader->positionSec();
+    double metaDur = mVideoReader->durationSec();
+    double frameDur = mVideoReader->frameDurationSec();
+    if (frameDur < 1e-6 || frameDur > 1.0) {
+        frameDur = 1.0 / 30.0;
+    }
+    double tMax = metaDur;
+    if (tMax <= 0.001) {
+        tMax = std::max(60.0, pos + kJumpSec);
+    } else {
+        const double endSlack = std::max(frameDur * 3.0, 0.1);
+        tMax = std::max(0.0, metaDur - endSlack);
+    }
+    double newPos = pos + static_cast<double>(direction) * kJumpSec;
+    if (newPos < 0.0) {
+        newPos = 0.0;
+    } else if (newPos > tMax) {
+        newPos = tMax;
+    }
+    mVideoReader->seek(newPos);
+    mVideoReader->decodeFrameThrough(newPos);
+    uploadVideoTexture();
+    mVideoScrubValue = mVideoReader->positionSec();
+#endif
+}
+
+void App::stepVideoScrubOneFrame(int direction)
+{
+#if !defined(USE_VIDEO)
+    (void)direction;
+    return;
+#else
+    if (!mVideoReader || !mVideoReader->isOpen() || direction == 0) {
+        return;
+    }
+    mVideoPlaying = false;
+    mVideoPlaybackTimeBank = 0.0;
+    if (videoCompareActive()) {
+        double stepA = mVideoReader->frameDurationSec();
+        double stepB =
+            (mVideoReaderB && mVideoReaderB->isOpen()) ? mVideoReaderB->frameDurationSec() : stepA;
+        if (stepA < 1e-6 || stepA > 1.0) {
+            stepA = 1.0 / 30.0;
+        }
+        if (stepB < 1e-6 || stepB > 1.0) {
+            stepB = 1.0 / 30.0;
+        }
+        const double step = (std::min)(stepA, stepB);
+        mVideoCompositionT += static_cast<double>(direction) * step;
+        clampVideoCompositionT();
+        syncVideoDecodersToCompositionT();
+        mVideoScrubValue = mVideoCompositionT;
+        return;
+    }
+    double step = mVideoReader->frameDurationSec();
+    if (step < 1e-6 || step > 1.0) {
+        step = 1.0 / 30.0;
+    }
+    const double pos = mVideoReader->positionSec();
+    double metaDur = mVideoReader->durationSec();
+    double tMax = metaDur;
+    if (tMax <= 0.001) {
+        tMax = std::max(60.0, pos + 5.0);
+    } else {
+        const double endSlack = std::max(step * 3.0, 0.1);
+        tMax = std::max(0.0, metaDur - endSlack);
+    }
+    double newPos = pos + static_cast<double>(direction) * step;
+    if (newPos < 0.0) {
+        newPos = 0.0;
+    } else if (newPos > tMax) {
+        newPos = tMax;
+    }
+    mVideoReader->seek(newPos);
+    mVideoReader->decodeFrameThrough(newPos);
+    uploadVideoTexture();
+    mVideoScrubValue = mVideoReader->positionSec();
+#endif
+}
+
 namespace {
 std::string normalizeVideoPath(std::string p)
 {
@@ -2932,13 +3069,46 @@ void App::openVideoCompare(const std::string& leftPath, const std::string& right
 #else
     const int idxL = addVideoPath(leftPath);
     const int idxR = addVideoPath(rightPath);
-    if (idxL < 0 || idxR < 0 || idxL == idxR) {
+    if (idxL < 0 || idxR < 0) {
+        return;
+    }
+    if (idxL == idxR) {
+        // Same list entry (duplicate path or identical paths after normalization). Opening compare
+        // with one file used to bail out entirely and leave video mode empty — that looked like a
+        // failed import and could strand the app if MF paths were flaky on retry.
+        LOGW("Video compare: left and right resolve to the same list row; opening as single view.");
+        mVideoIndexL = idxL;
+        mVideoIndexR = -1;
+        openVideosFromSelection();
         return;
     }
     mVideoIndexL = idxL;
     mVideoIndexR = idxR;
     openVideosFromSelection();
     LOGI("Video compare: left \"{}\", right \"{}\"", mVideoPaths[idxL], mVideoPaths[idxR]);
+#endif
+}
+
+void App::openVideoPaths(const std::vector<std::string>& paths)
+{
+#if !defined(USE_VIDEO)
+    (void)paths;
+    LOGW("Video playback is disabled in this build (USE_VIDEO).");
+#else
+    if (paths.empty()) {
+        return;
+    }
+    for (const std::string& p : paths) {
+        const int idx = addVideoPath(p);
+        if (idx >= 0) {
+            if (mVideoIndexL < 0) {
+                mVideoIndexL = idx;
+            } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
+                mVideoIndexR = idx;
+            }
+        }
+    }
+    openVideosFromSelection();
 #endif
 }
 
@@ -3139,16 +3309,16 @@ void App::renderVideoBlit(const ImGuiIO& io)
 
         const MFVideoReader* r0 = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
         const MFVideoReader* r1 = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
-        mVideoBlitShader.setUniform("uVideoSize", Vec2f(static_cast<float>(r0->width()),
-            static_cast<float>(r0->height())));
-        mVideoBlitShader.setUniform("uVideoSizeR", Vec2f(static_cast<float>(r1->width()),
-            static_cast<float>(r1->height())));
+        mVideoBlitShader.setUniform(
+            "uVideoSize", Vec2f(r0->displayWidthForAspect(), r0->displayHeightForAspect()));
+        mVideoBlitShader.setUniform(
+            "uVideoSizeR", Vec2f(r1->displayWidthForAspect(), r1->displayHeightForAspect()));
         mVideoBlitShader.setUniform("uSplitPos", mViewSplitPos);
     } else {
         mVideoBlitShader.setUniform("uCompareMode", 0);
         mVideoBlitShader.setUniform("uVideo", 0);
-        mVideoBlitShader.setUniform("uVideoSize", Vec2f(static_cast<float>(mVideoReader->width()),
-            static_cast<float>(mVideoReader->height())));
+        mVideoBlitShader.setUniform("uVideoSize",
+            Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect()));
     }
     mVideoBlitShader.drawTriangle();
     glActiveTexture(GL_TEXTURE1);

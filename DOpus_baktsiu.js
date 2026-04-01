@@ -1,7 +1,7 @@
 // Bak-Tsiu launcher for Directory Opus (JScript):
 // - No file selected -> start Bak-Tsiu with no arguments
 // - One file        -> open that file (normal view)
-// - Two or more     -> --split + all paths (split view, all images imported)
+// - Two or more     -> --split + all paths (split compare; all videos in media list)
 //
 // Uses tab.selstats.selfiles and tab.selected_files (not Tab.selected / raw
 // Item.realpath strings) to avoid 0x8000ffff COM issues in JScript.

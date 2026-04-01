@@ -26,6 +26,10 @@ public:
 
     int width() const { return m_width; }
     int height() const { return m_height; }
+    // Pixel aspect ratio times frame size, for layout (MF_MT_PIXEL_ASPECT_RATIO). Matches coded
+    // dimensions when PAR is 1:1; anamorphic/square-frame portrait encodes use PAR so DAR is correct.
+    float displayWidthForAspect() const;
+    float displayHeightForAspect() const;
     double durationSec() const { return m_durationSec; }
     double positionSec() const { return m_positionSec; }
     double frameDurationSec() const { return m_frameDurationSec; }
@@ -44,6 +48,8 @@ private:
 
     int m_width = 0;
     int m_height = 0;
+    int m_pixelAspectNum = 1;
+    int m_pixelAspectDen = 1;
     int m_strideBytes = 0;
     double m_durationSec = 0.0;
     double m_positionSec = 0.0;

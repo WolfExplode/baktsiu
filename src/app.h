@@ -118,6 +118,9 @@ public:
 
     void    openVideoCompare(const std::string& leftPath, const std::string& rightPath);
 
+    // Add every path to the media list (order preserved), set L/R to the first two distinct items, open.
+    void    openVideoPaths(const std::vector<std::string>& paths);
+
     void    run(CompositeFlags initFlags = CompositeFlags::Top);
 
     void    release();
@@ -243,6 +246,10 @@ private:
     void    clampVideoCompositionT();
 
     void    syncVideoDecodersToCompositionT();
+
+    // Video scrub: direction -1 = earlier, +1 = later.
+    void    stepVideoScrubFiveSeconds(int direction);
+    void    stepVideoScrubOneFrame(int direction);
 
     void    swapVideoSides();
 
