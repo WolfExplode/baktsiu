@@ -147,6 +147,8 @@ private:
 
     void    showImageProperties();
 
+    void    showVideoProperties();
+
     // Show image name overlays viewport.
     void    showImageNameOverlays();
 
@@ -171,8 +173,14 @@ private:
 
     void    updateImageSplitterPos(ImGuiIO&);
 
-    // Dispatch compute kernels for image statistics.
-    void    computeImageStatistics(const RenderTexture&, float valueScale);
+    // Dispatch compute kernels for image statistics (histGpuTex + histCpu are a matched pair per stream).
+    void    computeImageStatistics(
+        const RenderTexture& texture, float valueScale, GLuint histGpuTex, std::array<int, 768>& histCpu);
+
+#if defined(USE_VIDEO)
+    void computeVideoTextureHistogram(
+        GLuint rgba8Tex, int width, int height, GLuint histGpuTex, std::array<int, 768>& histCpu);
+#endif
 
     // Reset image transform to viewport center.
     void    resetImageTransform(const Vec2f& imgSize, bool fitWindow = false);
@@ -288,10 +296,16 @@ private:
     Shader          mGradingShader;
     Shader          mPresentShader;
     Shader          mStatisticsShader;
-    GLuint          mTexHistogram;
+#if defined(USE_VIDEO)
+    Shader          mVideoStatisticsShader;
+    bool            mVideoRgbHistogramComputeReady = false;
+#endif
+    GLuint          mTexHistogram = 0;
+    GLuint          mTexHistogramB = 0;
     Sampler         mPointSampler;
     
     std::array<int, 768> mHistogram;
+    std::array<int, 768> mHistogramB;
 
     CompositeFlags      mCompositeFlags = CompositeFlags::Top;
     PixelMarkerFlags    mPixelMarkerFlags = PixelMarkerFlags::Default;

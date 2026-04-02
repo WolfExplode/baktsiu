@@ -24,6 +24,7 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 #include <fx/gltf.h>
@@ -506,7 +507,22 @@ bool App::initialize(const char* title, int width, int height)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32I, static_cast<GLint>(mHistogram.size()), 1);
+        glGenTextures(1, &mTexHistogramB);
+        glBindTexture(GL_TEXTURE_2D, mTexHistogramB);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32I, static_cast<GLint>(mHistogramB.size()), 1);
+        glBindTexture(GL_TEXTURE_2D, 0);
         status = mStatisticsShader.initCompute("statistics", statistics_comp);
+#if defined(USE_VIDEO) && defined(EMBED_SHADERS)
+        try {
+            mVideoRgbHistogramComputeReady =
+                mVideoStatisticsShader.initCompute("statistics_rgba8", statistics_rgba8_comp);
+        } catch (const std::exception& e) {
+            LOGW("Failed to init video histogram compute shader: {}", e.what());
+            mVideoRgbHistogramComputeReady = false;
+        }
+#endif
     }
 
     mPointSampler.initialize(GL_NEAREST, GL_NEAREST);
@@ -559,6 +575,8 @@ void App::release()
         mVideoBlitShader.release();
         mVideoShaderReady = false;
     }
+    mVideoStatisticsShader.release();
+    mVideoRgbHistogramComputeReady = false;
 #endif
 
     // Cleanup
@@ -567,6 +585,16 @@ void App::release()
 
     mPresentShader.release();
     mGradingShader.release();
+
+    if (mTexHistogram != 0) {
+        glDeleteTextures(1, &mTexHistogram);
+        mTexHistogram = 0;
+    }
+    if (mTexHistogramB != 0) {
+        glDeleteTextures(1, &mTexHistogramB);
+        mTexHistogramB = 0;
+    }
+    mStatisticsShader.release();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -716,7 +744,8 @@ void App::run(CompositeFlags initFlags)
                 gradingTexImage(*topImage, mTopImageRenderTexIdx);
                 if (mShowImagePropWindow && mSupportComputeShader) {
                     float valueScale = topImage->getColorEncodingType() == ColorEncodingType::Linear ? 1.0f : 255.0f;
-                    computeImageStatistics(mRenderTextures[mTopImageRenderTexIdx], valueScale);
+                    computeImageStatistics(
+                        mRenderTextures[mTopImageRenderTexIdx], valueScale, mTexHistogram, mHistogram);
                 }
             }
 
@@ -725,6 +754,12 @@ void App::run(CompositeFlags initFlags)
                 Image* cmpImage = mImageList[mCmpImageIndex].get();
                 if (cmpImage->texId() != 0) {
                     gradingTexImage(*cmpImage, mTopImageRenderTexIdx ^ 1);
+                    if (mShowImagePropWindow && mSupportComputeShader) {
+                        const float valueScaleB =
+                            cmpImage->getColorEncodingType() == ColorEncodingType::Linear ? 1.0f : 255.0f;
+                        computeImageStatistics(
+                            mRenderTextures[mTopImageRenderTexIdx ^ 1], valueScaleB, mTexHistogramB, mHistogramB);
+                    }
                 }
             }
 
@@ -803,6 +838,31 @@ void App::run(CompositeFlags initFlags)
 #if defined(USE_VIDEO)
         else {
             renderVideoBlit(io);
+            if (mShowImagePropWindow && mSupportComputeShader && mVideoRgbHistogramComputeReady && mVideoReader
+                && mVideoReader->isOpen() && mVideoTexture != 0) {
+                const bool pipeBothSides = videoCompareActive() && inCompareMode();
+                if (pipeBothSides && mVideoReaderB && mVideoReaderB->isOpen() && mVideoTextureB != 0) {
+                    const bool dispSwap = mVideoSwapPresentationLR;
+                    if (dispSwap) {
+                        computeVideoTextureHistogram(mVideoTextureB, mVideoReaderB->width(), mVideoReaderB->height(),
+                            mTexHistogram, mHistogram);
+                        computeVideoTextureHistogram(mVideoTexture, mVideoReader->width(), mVideoReader->height(),
+                            mTexHistogramB, mHistogramB);
+                    } else {
+                        computeVideoTextureHistogram(mVideoTexture, mVideoReader->width(), mVideoReader->height(),
+                            mTexHistogram, mHistogram);
+                        computeVideoTextureHistogram(mVideoTextureB, mVideoReaderB->width(), mVideoReaderB->height(),
+                            mTexHistogramB, mHistogramB);
+                    }
+                } else if (videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen() && mVideoTextureB != 0
+                    && mVideoSwapPresentationLR) {
+                    computeVideoTextureHistogram(mVideoTextureB, mVideoReaderB->width(), mVideoReaderB->height(),
+                        mTexHistogram, mHistogram);
+                } else {
+                    computeVideoTextureHistogram(
+                        mVideoTexture, mVideoReader->width(), mVideoReader->height(), mTexHistogram, mHistogram);
+                }
+            }
         }
 #endif
 
@@ -844,29 +904,55 @@ void    App::gradingTexImage(Image& image, int renderTexIdx)
     mRenderTextures[renderTexIdx].unbind();
 }
 
-void    App::computeImageStatistics(const RenderTexture& texture, float valueScale)
+void App::computeImageStatistics(
+    const RenderTexture& texture, float valueScale, GLuint histGpuTex, std::array<int, 768>& histCpu)
 {
+    if (histGpuTex == 0) {
+        return;
+    }
     ScopeMarker("Compute Image Statistics");
 
-    // Calculate image statistics.
-    std::fill(mHistogram.begin(), mHistogram.end(), 0);
-    glBindTexture(GL_TEXTURE_2D, mTexHistogram);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLint>(mHistogram.size()), 1, GL_RED_INTEGER, GL_INT, (void*)mHistogram.data());
+    std::fill(histCpu.begin(), histCpu.end(), 0);
+    glBindTexture(GL_TEXTURE_2D, histGpuTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLint>(histCpu.size()), 1, GL_RED_INTEGER, GL_INT,
+        (void*)histCpu.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
     mStatisticsShader.bind();
     glBindImageTexture(0, texture.id(), 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA16F);
-    glBindImageTexture(1, mTexHistogram, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32I);
+    glBindImageTexture(1, histGpuTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32I);
 
     Vec2i size = texture.size();
     mStatisticsShader.setUniform("uImageSize", size);
     mStatisticsShader.setUniform("uValueScale", valueScale);
     mStatisticsShader.compute(size.x / 16, size.y / 16);
-
-    /*glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
-    glBindTexture(GL_TEXTURE_2D, mTexHistogram);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_INT, (void*)mHistogram.data());*/
 }
+
+#if defined(USE_VIDEO)
+void App::computeVideoTextureHistogram(
+    GLuint rgba8Tex, int width, int height, GLuint histGpuTex, std::array<int, 768>& histCpu)
+{
+    if (!mVideoRgbHistogramComputeReady || rgba8Tex == 0 || histGpuTex == 0 || width <= 0 || height <= 0) {
+        return;
+    }
+    ScopeMarker("Compute Video Histogram");
+
+    std::fill(histCpu.begin(), histCpu.end(), 0);
+    glBindTexture(GL_TEXTURE_2D, histGpuTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLint>(histCpu.size()), 1, GL_RED_INTEGER, GL_INT,
+        (void*)histCpu.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    mVideoStatisticsShader.bind();
+    glBindImageTexture(0, rgba8Tex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+    glBindImageTexture(1, histGpuTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32I);
+
+    const Vec2i size(width, height);
+    mVideoStatisticsShader.setUniform("uImageSize", size);
+    mVideoStatisticsShader.setUniform("uValueScale", 255.0f);
+    mVideoStatisticsShader.compute(static_cast<GLuint>(size.x / 16), static_cast<GLuint>(size.y / 16));
+}
+#endif
 
 void    App::onKeyPressed(const ImGuiIO& io)
 {
@@ -1492,28 +1578,66 @@ void App::initImagePropWindow()
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
     
     auto* topImage = getTopImage();
-    if (ImGui::CollapsingHeader("Histogram") && topImage && mSupportComputeShader) {
+#if defined(USE_VIDEO)
+    const bool histVideo = mVideoMode && mVideoReader && mVideoReader->isOpen() && mVideoTexture != 0
+        && mVideoRgbHistogramComputeReady;
+#else
+    const bool histVideo = false;
+#endif
+    const bool histImage = !mVideoMode && topImage;
+    if (ImGui::CollapsingHeader("Histogram") && mSupportComputeShader && (histImage || histVideo)) {
         ScopeMarker("Draw Histogram");
         glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
-        glBindTexture(GL_TEXTURE_2D, mTexHistogram);
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_INT, (void*)mHistogram.data());
 
-        ImGui::SetNextItemWidth(propWindowWidth - ImGui::GetStyle().ItemSpacing.x);
-        const char* names[3] = {"R", "G", "B"};
-        static ImColor colors[3] = { ImColor(255, 0, 0, 150), ImColor(0, 255, 0, 150), ImColor(0, 0, 255, 150) };
-        const int binSize = 256;
-        static float arr[binSize * 3];
-
-        // Get the first 25-th largest bin counts and use it as the normalize factor.
-        std::vector<int> temp;
-        temp.assign(mHistogram.begin(), mHistogram.end());
-        std::nth_element(temp.begin(), temp.end() - 25, temp.end());
-        int normPixelCount =*(temp.end() - 25);
+        const bool dualHistImage =
+            !mVideoMode && inCompareMode() && topImage && mCmpImageIndex >= 0
+            && static_cast<size_t>(mCmpImageIndex) < mImageList.size()
+            && mImageList[static_cast<size_t>(mCmpImageIndex)]->texId() != 0;
+#if defined(USE_VIDEO)
+        const bool dualHistVideo = mVideoMode && inCompareMode() && videoCompareActive() && mVideoReaderB
+            && mVideoReaderB->isOpen() && mVideoTextureB != 0;
+#else
+        const bool dualHistVideo = false;
+#endif
+        const bool dualHist = dualHistImage || dualHistVideo;
 
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, Vec2f(3.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(69, 69, 69, 255));
         ImGui::PushFont(mSmallFont);
-        ImGui::PlotMultiHistograms("##histogram", 3, names, colors, mHistogram.data(), normPixelCount, binSize, 0.0f, 1.0f, ImVec2(0, 100));
+
+        auto plotRgbHistogram = [&](const char* plotId, int* hist768) {
+            ImGui::SetNextItemWidth(propWindowWidth - ImGui::GetStyle().ItemSpacing.x);
+            const char* names[3] = {"R", "G", "B"};
+            static ImColor colors[3] = { ImColor(255, 0, 0, 150), ImColor(0, 255, 0, 150), ImColor(0, 0, 255, 150) };
+            constexpr int binSize = 256;
+            std::vector<int> temp;
+            temp.assign(hist768, hist768 + 768);
+            std::nth_element(temp.begin(), temp.end() - 25, temp.end());
+            const int normPixelCount = *(temp.end() - 25);
+            ImGui::PlotMultiHistograms(
+                plotId, 3, names, colors, hist768, normPixelCount, binSize, 0.0f, 1.0f, ImVec2(0, 100));
+        };
+
+        if (dualHist) {
+            const ImVec4 tintL(0.25f, 0.80f, 0.75f, 1.0f);
+            const ImVec4 tintR(0.95f, 0.55f, 0.20f, 1.0f);
+            glBindTexture(GL_TEXTURE_2D, mTexHistogram);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_INT, (void*)mHistogram.data());
+            ImGui::TextColored(tintL, "Left");
+            plotRgbHistogram("##histogramL", mHistogram.data());
+            ImGui::Spacing();
+            glBindTexture(GL_TEXTURE_2D, mTexHistogramB);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_INT, (void*)mHistogramB.data());
+            ImGui::TextColored(tintR, "Right");
+            plotRgbHistogram("##histogramR", mHistogramB.data());
+            glBindTexture(GL_TEXTURE_2D, 0);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, mTexHistogram);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RED_INTEGER, GL_INT, (void*)mHistogram.data());
+            plotRgbHistogram("##histogram", mHistogram.data());
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
         ImGui::PopFont();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(1);
@@ -1525,7 +1649,17 @@ void App::initImagePropWindow()
     //if (ImGui::CollapsingHeader("Wavefront")) {
     //}
 
-    if (ImGui::CollapsingHeader("Image Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (mVideoMode) {
+#if defined(USE_VIDEO)
+        if (ImGui::CollapsingHeader("Video Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+            showVideoProperties();
+        }
+#else
+        if (ImGui::CollapsingHeader("Video Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextUnformatted("Video is not available in this build.");
+        }
+#endif
+    } else if (ImGui::CollapsingHeader("Image Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
         showImageProperties();
     }
 
@@ -1974,6 +2108,157 @@ void    App::showImageProperties()
     ImGui::Text("%.0fx%.0f", imageSize.x, imageSize.y);
     //ImGui::Text("8 bit");
     ImGui::NextColumn();
+}
+
+void App::showVideoProperties()
+{
+#if !defined(USE_VIDEO)
+    ImGui::TextUnformatted("Video is not available in this build.");
+    return;
+#else
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        ImGui::TextUnformatted("No video loaded.");
+        return;
+    }
+
+    ImGui::Columns(2, nullptr, false);
+    ImGui::SetColumnWidth(0, 108.0f);
+
+    ImGui::TextUnformatted("Property");
+    ImGui::NextColumn();
+    ImGui::TextUnformatted("Value");
+    ImGui::NextColumn();
+    ImGui::Separator();
+
+    double tMin = 0.0;
+    double tMax = 1.0;
+    recomputeVideoScrubBounds(tMin, tMax);
+    char tComp[32];
+    char tEnd[32];
+    formatVideoHms(mVideoCompositionT, tComp, sizeof tComp);
+    formatVideoHms(tMax, tEnd, sizeof tEnd);
+    ImGui::TextUnformatted("Composition T");
+    ImGui::NextColumn();
+    {
+        char line[80];
+        std::snprintf(line, sizeof line, "%s / %s", tComp, tEnd);
+        ImGui::TextUnformatted(line);
+    }
+    ImGui::NextColumn();
+
+    const bool cmp = videoCompareActive();
+    if (cmp) {
+        const bool dispSwap = mVideoSwapPresentationLR;
+        char offL[48];
+        char offR[48];
+        std::snprintf(offL, sizeof offL, "%.3f s", dispSwap ? mVideoStartR : mVideoStartL);
+        std::snprintf(offR, sizeof offR, "%.3f s", dispSwap ? mVideoStartL : mVideoStartR);
+        ImGui::TextUnformatted("Left offset");
+        ImGui::NextColumn();
+        ImGui::TextUnformatted(offL);
+        ImGui::NextColumn();
+        ImGui::TextUnformatted("Right offset");
+        ImGui::NextColumn();
+        ImGui::TextUnformatted(offR);
+        ImGui::NextColumn();
+    }
+
+    auto drawStream = [&](const char* sideTitle, const MpvGlPlayer* p, const std::string& path) {
+        ImGui::Columns(1);
+        ImGui::Spacing();
+        ImGui::TextUnformatted(sideTitle);
+        ImGui::Separator();
+        ImGui::Columns(2, nullptr, false);
+        ImGui::SetColumnWidth(0, 108.0f);
+
+        if (!p || !p->isOpen()) {
+            ImGui::TextUnformatted("Status");
+            ImGui::NextColumn();
+            ImGui::TextUnformatted("-");
+            ImGui::NextColumn();
+            return;
+        }
+
+        ImGui::TextUnformatted("File");
+        ImGui::NextColumn();
+        if (path.empty()) {
+            ImGui::TextUnformatted("-");
+        } else {
+            ImGui::TextUnformatted(path.c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", path.c_str());
+            }
+        }
+        ImGui::NextColumn();
+
+        ImGui::TextUnformatted("Coded size");
+        ImGui::NextColumn();
+        {
+            char sz[64];
+            std::snprintf(sz, sizeof sz, "%d x %d", p->width(), p->height());
+            ImGui::TextUnformatted(sz);
+        }
+        ImGui::NextColumn();
+
+        ImGui::TextUnformatted("Display size");
+        ImGui::NextColumn();
+        {
+            char sz[64];
+            std::snprintf(sz, sizeof sz, "%.0f x %.0f", static_cast<double>(p->displayWidthForAspect()),
+                static_cast<double>(p->displayHeightForAspect()));
+            ImGui::TextUnformatted(sz);
+        }
+        ImGui::NextColumn();
+
+        ImGui::TextUnformatted("Duration");
+        ImGui::NextColumn();
+        if (p->hasReliableDuration() && p->durationSec() > 0.001) {
+            char dur[32];
+            formatVideoHms(p->durationSec(), dur, sizeof dur);
+            ImGui::TextUnformatted(dur);
+        } else {
+            ImGui::TextUnformatted("Unknown");
+        }
+        ImGui::NextColumn();
+
+        ImGui::TextUnformatted("Position");
+        ImGui::NextColumn();
+        {
+            char pos[32];
+            formatVideoHms(p->positionSec(), pos, sizeof pos);
+            ImGui::TextUnformatted(pos);
+        }
+        ImGui::NextColumn();
+
+        ImGui::TextUnformatted("Frame rate");
+        ImGui::NextColumn();
+        {
+            const double fd = p->frameDurationSec();
+            char fr[48];
+            if (fd > 1e-6 && fd < 1.0) {
+                std::snprintf(fr, sizeof fr, "%.2f fps", 1.0 / fd);
+                ImGui::TextUnformatted(fr);
+            } else {
+                ImGui::TextUnformatted("-");
+            }
+        }
+        ImGui::NextColumn();
+    };
+
+    if (cmp) {
+        const bool dispSwap = mVideoSwapPresentationLR;
+        const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+        const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+        const std::string& leftPath = dispSwap ? mVideoPathR : mVideoPathL;
+        const std::string& rightPath = dispSwap ? mVideoPathL : mVideoPathR;
+        drawStream("Left (on screen)", leftP, leftPath);
+        drawStream("Right (on screen)", rightP, rightPath);
+    } else {
+        drawStream("Video", mVideoReader.get(), mVideoPathL);
+    }
+
+    ImGui::Columns(1);
+#endif
 }
 
 void    App::initHomeWindow(const char* name)
@@ -2629,7 +2914,21 @@ inline void    App::toggleSplitView()
 #endif
         ;
     if (canCompare) {
+#if defined(USE_VIDEO)
+        const CompositeFlags prevComposite = mCompositeFlags;
+#endif
         mCompositeFlags = toggleFlags(mCompositeFlags & ~CompositeFlags::SideBySide, CompositeFlags::Split);
+#if defined(USE_VIDEO)
+        if (mVideoMode && videoCompareActive()) {
+            const bool wasLayoutCompare =
+                (prevComposite & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+            const bool nowLayoutCompare =
+                (mCompositeFlags & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+            if (!wasLayoutCompare && nowLayoutCompare) {
+                resetVideoDecoderSyncCache();
+            }
+        }
+#endif
     }
 }
 
@@ -2641,7 +2940,21 @@ inline void    App::toggleSideBySideView()
 #endif
         ;
     if (canCompare) {
+#if defined(USE_VIDEO)
+        const CompositeFlags prevComposite = mCompositeFlags;
+#endif
         mCompositeFlags = toggleFlags(mCompositeFlags & ~CompositeFlags::Split, CompositeFlags::SideBySide);
+#if defined(USE_VIDEO)
+        if (mVideoMode && videoCompareActive()) {
+            const bool wasLayoutCompare =
+                (prevComposite & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+            const bool nowLayoutCompare =
+                (mCompositeFlags & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+            if (!wasLayoutCompare && nowLayoutCompare) {
+                resetVideoDecoderSyncCache();
+            }
+        }
+#endif
     }
 }
 
@@ -3009,21 +3322,29 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
     const double tL = mediaTimeFromComposition(mVideoCompositionT, mVideoStartL, dL);
     double tR = 0.0;
     bool hasR = false;
-    const double epsL = mediaSyncEpsilonSec(mVideoReader.get());
-    const bool needL = (mVideoLastSyncedTargetMediaL < 0.0)
-        || (std::fabs(tL - mVideoLastSyncedTargetMediaL) > epsL);
-    if (needL) {
-        mVideoReader->seek(tL, maxDecodeReadCapPerStream <= 0);
-        mVideoReader->decodeFrameThrough(tL, maxDecodeReadCapPerStream);
-        uploadVideoTexture();
-        ranDecodeL = true;
-        // Preview decodes use a read cap and may not reach target; keep cache for skip-optimization
-        // aligned with full-quality sync only.
-        if (maxDecodeReadCapPerStream <= 0) {
-            mVideoLastSyncedTargetMediaL = tL;
+
+    // Split / column: both streams on screen. Top with two clips: only the presented "t0" side runs seek/decode/upload.
+    const bool pipeBothSides = videoCompareActive() && inCompareMode();
+    const bool visibleIsReaderB = mVideoSwapPresentationLR && videoCompareActive();
+    const bool runSyncL = !videoCompareActive() || pipeBothSides || !visibleIsReaderB;
+    const bool runSyncR = videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()
+        && (pipeBothSides || visibleIsReaderB);
+
+    if (runSyncL) {
+        const double epsL = mediaSyncEpsilonSec(mVideoReader.get());
+        const bool needL = (mVideoLastSyncedTargetMediaL < 0.0)
+            || (std::fabs(tL - mVideoLastSyncedTargetMediaL) > epsL);
+        if (needL) {
+            mVideoReader->seek(tL, maxDecodeReadCapPerStream <= 0);
+            mVideoReader->decodeFrameThrough(tL, maxDecodeReadCapPerStream);
+            uploadVideoTexture();
+            ranDecodeL = true;
+            if (maxDecodeReadCapPerStream <= 0) {
+                mVideoLastSyncedTargetMediaL = tL;
+            }
         }
     }
-    if (videoCompareActive()) {
+    if (runSyncR) {
         const double dR = videoScrubSpanSec(mVideoReaderB.get());
         tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
         hasR = true;
@@ -3039,7 +3360,8 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
                 mVideoLastSyncedTargetMediaR = tR;
             }
         }
-    } else {
+    }
+    if (!videoCompareActive()) {
         mVideoLastSyncedTargetMediaR = -1.0;
     }
     if (videoPipelineDbgEnabled(mVideoLogPipelineTiming) && (ranDecodeL || ranDecodeR)) {
@@ -3684,6 +4006,11 @@ void App::tickAndUploadVideoFrame(float deltaTime)
         const double dL = videoScrubSpanSec(mVideoReader.get());
         const double dR = videoScrubSpanSec(mVideoReaderB.get());
         constexpr double kNeedMediaStepEps = 1e-9;
+        const bool pipeBothSides = inCompareMode();
+        const bool visibleIsReaderB = mVideoSwapPresentationLR;
+        const bool runDecodeL = pipeBothSides || !visibleIsReaderB;
+        const bool runDecodeR =
+            mVideoReaderB && mVideoReaderB->isOpen() && (pipeBothSides || visibleIsReaderB);
         if (n > 0) {
             // Advance composition time in lockstep; frame-step a side only when its clamped media time would
             // move (see mediaTimeFromComposition). Otherwise decodeFrame hits eof-reached on the short clip
@@ -3697,13 +4024,12 @@ void App::tickAndUploadVideoFrame(float deltaTime)
                 const double tRNext = mediaTimeFromComposition(Tnext, mVideoStartR, dR);
                 const bool needL = tLNext > tLNow + kNeedMediaStepEps;
                 const bool needR = tRNext > tRNow + kNeedMediaStepEps;
-                if (needL && !mVideoReader->decodeFrame(true)) {
+                if (needL && runDecodeL && !mVideoReader->decodeFrame(true)) {
                     mVideoComparePlaybackBank = 0.0;
                     mVideoPlaying = false;
                     break;
                 }
-                if (needR
-                    && (!mVideoReaderB || !mVideoReaderB->isOpen() || !mVideoReaderB->decodeFrame(true))) {
+                if (needR && runDecodeR && !mVideoReaderB->decodeFrame(true)) {
                     mVideoComparePlaybackBank = 0.0;
                     mVideoPlaying = false;
                     break;
@@ -3716,8 +4042,12 @@ void App::tickAndUploadVideoFrame(float deltaTime)
                     break;
                 }
             }
-            uploadVideoTexture();
-            uploadVideoTextureB();
+            if (runDecodeL) {
+                uploadVideoTexture();
+            }
+            if (runDecodeR) {
+                uploadVideoTextureB();
+            }
         }
         clampVideoCompositionT();
         if (mVideoCompositionT >= tMax - kEndEps) {
