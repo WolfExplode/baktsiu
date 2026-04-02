@@ -16,16 +16,6 @@
 #include <spdlog/spdlog.h>
 #pragma warning(pop)
 
-#if defined(_WIN32) && defined(USE_VIDEO)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
-
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -35,10 +25,6 @@
 #include <memory>
 #include <sstream>
 #include <thread>
-
-#if defined(_WIN32) && defined(USE_VIDEO)
-#include <objbase.h>
-#endif
 
 #include <fx/gltf.h>
 #include <stb_image.h>
@@ -371,11 +357,6 @@ bool App::initialize(const char* title, int width, int height)
 {
     initLogger();
 
-#if defined(_WIN32) && defined(USE_VIDEO)
-    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    mVideoComInitialized = (hrCom == S_OK);
-#endif
-
     glfwSetErrorCallback([](int error, const char* description) {
         LOGW("GLFW error {}: {}", error, description);
     });
@@ -591,13 +572,6 @@ void App::release()
 
     glfwDestroyWindow(mWindow);
     glfwTerminate();
-
-#if defined(_WIN32) && defined(USE_VIDEO)
-    if (mVideoComInitialized) {
-        CoUninitialize();
-        mVideoComInitialized = false;
-    }
-#endif
 }
 
 // This is executed in main thread (which has GL context).
@@ -716,20 +690,8 @@ void App::run(CompositeFlags initFlags)
         }
 #if defined(USE_VIDEO)
         else {
-            bool videoReaderDidRewind = false;
             if (mVideoLazyDurationGraceFrames > 0) {
                 --mVideoLazyDurationGraceFrames;
-            } else {
-                if (mVideoReader) {
-                    videoReaderDidRewind |= mVideoReader->lazyProbePresentationDuration();
-                }
-                if (videoCompareActive() && mVideoReaderB) {
-                    videoReaderDidRewind |= mVideoReaderB->lazyProbePresentationDuration();
-                }
-                if (videoReaderDidRewind) {
-                    resetVideoDecoderSyncCache();
-                    syncVideoDecodersToCompositionT();
-                }
             }
             tickAndUploadVideoFrame(io.DeltaTime);
             initVideoTransportBar(io);
@@ -2313,7 +2275,7 @@ void    App::showImportImageDlg()
     std::vector<std::string> videoPaths;
     std::vector<std::string> imagePaths;
     for (const std::string& path : selection) {
-        if (MFVideoReader::isSupportedExtension(path)) {
+        if (MpvGlPlayer::isSupportedExtension(path)) {
             videoPaths.push_back(path);
         } else {
             imagePaths.push_back(path);
@@ -2635,7 +2597,7 @@ void    App::onFileDrop(int count, const char* filepaths[])
 
         if (endsWith(filepath, ".bts")) {
             openSession(filepath);
-        } else if (MFVideoReader::isSupportedExtension(filepath)) {
+        } else if (MpvGlPlayer::isSupportedExtension(filepath)) {
             videoPaths.push_back(filepath);
         } else {
             filepathArray.push_back(filepath);
@@ -2698,10 +2660,10 @@ void    App::saveSession(const std::string& filepath)
 namespace
 {
 constexpr double kVideoScrubUnknownMaxSec = 3600.0 * 24.0;  // 24h upper composition bound when duration unknown
-// Must stay in sync with kForwardCatchupSec in mf_video_reader.cpp seek().
-constexpr double kMfForwardSeekCatchupSec = 1.35;
+// Small forward frame steps: prefer keyframe-style seek below this delta (see seek(..., false)).
+constexpr double kVideoForwardKeyframeSeekMaxSec = 1.35;
 
-double videoScrubSpanSec(const MFVideoReader* r)
+double videoScrubSpanSec(const MpvGlPlayer* r)
 {
     if (!r || !r->isOpen()) {
         return 0.0;
@@ -2730,7 +2692,7 @@ double mediaTimeFromComposition(double T, double startS, double durationSec)
 
 // Skip redundant seek/decode when scrubbing if target media time barely changed (compare mode: one
 // stream often stays clamped while the other moves).
-double mediaSyncEpsilonSec(const MFVideoReader* r)
+double mediaSyncEpsilonSec(const MpvGlPlayer* r)
 {
     if (!r || !r->isOpen()) {
         return 1e-4;
@@ -2744,12 +2706,11 @@ double mediaSyncEpsilonSec(const MFVideoReader* r)
 
 struct VideoScrubDecodeHint {
     bool run = false;
-    // 0 = full decodeFrameThrough iteration budget; >0 = cap ReadSamples (scrub preview only).
+    // 0 = exact seek + full render; >0 = keyframe-style seek (scrub preview only).
     int maxReadCapPerStream = 0;
 };
 
-// MF seek+decode is CPU-bound. While dragging: throttle + use a small read cap between previews; on grab,
-// release, or click: full decode to target frame.
+// While dragging: throttle + use keyframe seeks between previews; on grab, release, or click: exact seek.
 VideoScrubDecodeHint videoScrubDecodeHint(bool itemActive, bool itemActivated, bool itemClicked, bool valueChanged,
     bool itemDeactivated, double imguiTimeSec, double& lastDecodeTimeSec)
 {
@@ -2881,7 +2842,7 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
                 static_cast<double>(mVideoReader->lastSeekSetPosMs()),
                 static_cast<double>(mVideoReader->lastDecodeThroughMs()),
                 mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
-                static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+                static_cast<double>(mVideoDbgLastUploadLMs), 0);
         }
         if (ranDecodeR && mVideoReaderB && mVideoReaderB->isOpen()) {
             LOGI(
@@ -2892,7 +2853,7 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
                 static_cast<double>(mVideoReaderB->lastSeekSetPosMs()),
                 static_cast<double>(mVideoReaderB->lastDecodeThroughMs()),
                 mVideoReaderB->lastDecodeThroughReads(), mVideoReaderB->lastDecodeThroughHitCap() ? 1 : 0,
-                static_cast<double>(mVideoDbgLastUploadRMs), mVideoReaderB->usesGpuNv12Path() ? 1 : 0);
+                static_cast<double>(mVideoDbgLastUploadRMs), 0);
         }
     }
 #endif
@@ -2956,7 +2917,7 @@ void App::stepVideoScrubFiveSeconds(int direction)
             static_cast<double>(mVideoReader->lastSeekSetPosMs()),
             static_cast<double>(mVideoReader->lastDecodeThroughMs()),
             mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
-            static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+            static_cast<double>(mVideoDbgLastUploadLMs), 0);
     }
     mVideoScrubValue = mVideoReader->positionSec();
 #endif
@@ -3010,11 +2971,10 @@ void App::stepVideoScrubOneFrame(int direction)
     if (mVideoLogPipelineTiming) {
         mVideoDbgLastUploadLMs = 0.f;
     }
-    // Small forward steps: MFVideoReader::seek(..., false) skips Flush+SetCurrentPosition (avoids ~1s Flush
-    // stalls) and advances via decodeFrameThrough(ReadSample). Backward and large forward jumps still flush.
+    // Small forward steps: seek(..., false) uses keyframe-style seek in mpv; large/backward use exact seek.
     const double deltaSec = newPos - pos;
     const bool forwardCatchup =
-        direction > 0 && deltaSec >= -1e-9 && deltaSec <= kMfForwardSeekCatchupSec;
+        direction > 0 && deltaSec >= -1e-9 && deltaSec <= kVideoForwardKeyframeSeekMaxSec;
     mVideoReader->seek(newPos, !forwardCatchup);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
@@ -3027,7 +2987,7 @@ void App::stepVideoScrubOneFrame(int direction)
             static_cast<double>(mVideoReader->lastSeekSetPosMs()),
             static_cast<double>(mVideoReader->lastDecodeThroughMs()),
             mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
-            static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+            static_cast<double>(mVideoDbgLastUploadLMs), 0);
     }
     mVideoScrubValue = mVideoReader->positionSec();
 #endif
@@ -3148,30 +3108,15 @@ void App::openVideosFromSelection()
         }
     }
 
-    auto readerL = std::make_unique<MFVideoReader>();
-    std::unique_ptr<MFVideoReader> readerR;
+    auto readerL = std::make_unique<MpvGlPlayer>();
+    std::unique_ptr<MpvGlPlayer> readerR;
     bool openedL = false;
     bool openedR = false;
 
     if (idxR >= 0) {
-        readerR = std::make_unique<MFVideoReader>();
-#if defined(_WIN32) && defined(USE_VIDEO)
-        std::thread thOpenL([&]() {
-            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            openedL = readerL->open(pathL);
-            CoUninitialize();
-        });
-        std::thread thOpenR([&]() {
-            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            openedR = readerR->open(pathR);
-            CoUninitialize();
-        });
-        thOpenL.join();
-        thOpenR.join();
-#else
-        openedL = readerL->open(pathL);
-        openedR = readerR->open(pathR);
-#endif
+        readerR = std::make_unique<MpvGlPlayer>();
+        openedL = readerL->open(mWindow, pathL);
+        openedR = readerR->open(mWindow, pathR);
         if (!openedL) {
             LOGW("Failed to open video \"{}\"", pathL);
             if (openedR) {
@@ -3185,7 +3130,7 @@ void App::openVideosFromSelection()
             return;
         }
     } else {
-        openedL = readerL->open(pathL);
+        openedL = readerL->open(mWindow, pathL);
         if (!openedL) {
             LOGW("Failed to open video \"{}\"", pathL);
             return;
@@ -3208,14 +3153,6 @@ void App::openVideosFromSelection()
     if (mVideoTextureB != 0) {
         glDeleteTextures(1, &mVideoTextureB);
         mVideoTextureB = 0;
-    }
-    if (mVideoTextureUv != 0) {
-        glDeleteTextures(1, &mVideoTextureUv);
-        mVideoTextureUv = 0;
-    }
-    if (mVideoTextureUvB != 0) {
-        glDeleteTextures(1, &mVideoTextureUvB);
-        mVideoTextureUvB = 0;
     }
 
     clearImages(false);
@@ -3297,7 +3234,7 @@ void App::openVideoCompare(const std::string& leftPath, const std::string& right
     if (idxL == idxR) {
         // Same list entry (duplicate path or identical paths after normalization). Opening compare
         // with one file used to bail out entirely and leave video mode empty — that looked like a
-        // failed import and could strand the app if MF paths were flaky on retry.
+        // failed import and could strand the app on retry.
         LOGW("Video compare: left and right resolve to the same list row; opening as single view.");
         mVideoIndexL = idxL;
         mVideoIndexR = -1;
@@ -3347,7 +3284,6 @@ void App::exitVideoMode()
     mVideoStartL = mVideoStartR = 0.0;
     mVideoCompositionT = 0.0;
     mVideoSwapPresentationLR = false;
-    mVideoNv12DebugMode = 0;
     mVideoPathL.clear();
     mVideoPathR.clear();
     mVideoPaths.clear();
@@ -3369,18 +3305,6 @@ void App::exitVideoMode()
         glDeleteTextures(1, &mVideoTextureB);
         mVideoTextureB = 0;
     }
-    if (mVideoTextureUv != 0) {
-        glDeleteTextures(1, &mVideoTextureUv);
-        mVideoTextureUv = 0;
-    }
-    if (mVideoTextureUvB != 0) {
-        glDeleteTextures(1, &mVideoTextureUvB);
-        mVideoTextureUvB = 0;
-    }
-    if (mVideoDummyUvTex != 0) {
-        glDeleteTextures(1, &mVideoDummyUvTex);
-        mVideoDummyUvTex = 0;
-    }
 #endif
 }
 
@@ -3393,23 +3317,8 @@ void App::recreateVideoTexture()
         glDeleteTextures(1, &mVideoTexture);
         mVideoTexture = 0;
     }
-    if (mVideoTextureUv != 0) {
-        glDeleteTextures(1, &mVideoTextureUv);
-        mVideoTextureUv = 0;
-    }
     if (!mVideoReader || !mVideoReader->isOpen()) {
         return;
-    }
-    if (mVideoDummyUvTex == 0) {
-        uint8_t px[2] = {128, 128};
-        glGenTextures(1, &mVideoDummyUvTex);
-        glBindTexture(GL_TEXTURE_2D, mVideoDummyUvTex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, 1, 1, 0, GL_RG, GL_UNSIGNED_BYTE, px);
-        glBindTexture(GL_TEXTURE_2D, 0);
     }
     glGenTextures(1, &mVideoTexture);
     glBindTexture(GL_TEXTURE_2D, mVideoTexture);
@@ -3419,32 +3328,12 @@ void App::recreateVideoTexture()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     const int w = mVideoReader->width();
     const int h = mVideoReader->height();
-    if (mVideoReader->usesGpuNv12Path()) {
-        const int stride = mVideoReader->nv12StrideBytes();
-        const int yRows = mVideoReader->nv12YTexHeight();
-        const int uvRows = (yRows + 1) / 2;
-        const uint8_t* p = mVideoReader->nv12Buffer();
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, stride, yRows, 0, GL_RED, GL_UNSIGNED_BYTE, p);
-        glGenTextures(1, &mVideoTextureUv);
-        glBindTexture(GL_TEXTURE_2D, mVideoTextureUv);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, stride / 2, uvRows, 0, GL_RG, GL_UNSIGNED_BYTE,
-            p + static_cast<size_t>(stride) * static_cast<size_t>(yRows));
-        glBindTexture(GL_TEXTURE_2D, 0);
-        LOGI(
-            "OpenGL NV12 textures (L): pic {}x{} stride={} yRows={} uvRows={} displayW={:.2f} PAR {}:{}",
-            w, h, stride, yRows, uvRows, mVideoReader->displayWidthForAspect(),
-            mVideoReader->pixelAspectNum(), mVideoReader->pixelAspectDen());
-    } else {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
-    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
+    LOGI("OpenGL video texture (L): {}x{} display {:.0f}x{:.0f}", w, h,
+        static_cast<double>(mVideoReader->displayWidthForAspect()),
+        static_cast<double>(mVideoReader->displayHeightForAspect()));
 #endif
 }
 
@@ -3457,23 +3346,8 @@ void App::recreateVideoTextureB()
         glDeleteTextures(1, &mVideoTextureB);
         mVideoTextureB = 0;
     }
-    if (mVideoTextureUvB != 0) {
-        glDeleteTextures(1, &mVideoTextureUvB);
-        mVideoTextureUvB = 0;
-    }
     if (!mVideoReaderB || !mVideoReaderB->isOpen()) {
         return;
-    }
-    if (mVideoDummyUvTex == 0) {
-        uint8_t px[2] = {128, 128};
-        glGenTextures(1, &mVideoDummyUvTex);
-        glBindTexture(GL_TEXTURE_2D, mVideoDummyUvTex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, 1, 1, 0, GL_RG, GL_UNSIGNED_BYTE, px);
-        glBindTexture(GL_TEXTURE_2D, 0);
     }
     glGenTextures(1, &mVideoTextureB);
     glBindTexture(GL_TEXTURE_2D, mVideoTextureB);
@@ -3483,32 +3357,12 @@ void App::recreateVideoTextureB()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     const int w = mVideoReaderB->width();
     const int h = mVideoReaderB->height();
-    if (mVideoReaderB->usesGpuNv12Path()) {
-        const int stride = mVideoReaderB->nv12StrideBytes();
-        const int yRows = mVideoReaderB->nv12YTexHeight();
-        const int uvRows = (yRows + 1) / 2;
-        const uint8_t* p = mVideoReaderB->nv12Buffer();
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, stride, yRows, 0, GL_RED, GL_UNSIGNED_BYTE, p);
-        glGenTextures(1, &mVideoTextureUvB);
-        glBindTexture(GL_TEXTURE_2D, mVideoTextureUvB);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, stride / 2, uvRows, 0, GL_RG, GL_UNSIGNED_BYTE,
-            p + static_cast<size_t>(stride) * static_cast<size_t>(yRows));
-        glBindTexture(GL_TEXTURE_2D, 0);
-        LOGI(
-            "OpenGL NV12 textures (R): pic {}x{} stride={} yRows={} uvRows={} displayW={:.2f} PAR {}:{}",
-            w, h, stride, yRows, uvRows, mVideoReaderB->displayWidthForAspect(),
-            mVideoReaderB->pixelAspectNum(), mVideoReaderB->pixelAspectDen());
-    } else {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
-    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
+    LOGI("OpenGL video texture (R): {}x{} display {:.0f}x{:.0f}", w, h,
+        static_cast<double>(mVideoReaderB->displayWidthForAspect()),
+        static_cast<double>(mVideoReaderB->displayHeightForAspect()));
 #endif
 }
 
@@ -3523,31 +3377,7 @@ void App::uploadVideoTexture()
     namespace chrono = std::chrono;
     const bool timeUpload = mVideoLogPipelineTiming;
     const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    if (mVideoReader->usesGpuNv12Path()) {
-        const int stride = mVideoReader->nv12StrideBytes();
-        const int yRows = mVideoReader->nv12YTexHeight();
-        const int uvRows = (yRows + 1) / 2;
-        const uint8_t* p = mVideoReader->nv12Buffer();
-        const size_t yBytes = static_cast<size_t>(stride) * static_cast<size_t>(yRows);
-        // Upload full stride-wide rows (no GL_UNPACK_ROW_LENGTH): some drivers mis-handle
-        // ROW_LENGTH + GL_RED for glTexSubImage2D, which corrupts luma and washes the picture out.
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        glBindTexture(GL_TEXTURE_2D, mVideoTexture);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, stride, yRows, GL_RED, GL_UNSIGNED_BYTE, p);
-        glBindTexture(GL_TEXTURE_2D, mVideoTextureUv);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, stride / 2, uvRows, GL_RG, GL_UNSIGNED_BYTE, p + yBytes);
-        if (mVideoNv12DebugMode != 0) {
-            while (GLenum err = glGetError()) {
-                LOGW("uploadVideoTexture NV12 GL error after subimage: 0x{:x}", static_cast<unsigned>(err));
-            }
-        }
-    } else {
-        glBindTexture(GL_TEXTURE_2D, mVideoTexture);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mVideoReader->width(), mVideoReader->height(),
-            GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
-    }
-    glBindTexture(GL_TEXTURE_2D, 0);
+    mVideoReader->renderToTexture(mVideoTexture);
     if (timeUpload) {
         mVideoDbgLastUploadLMs = chrono::duration<float, std::milli>(chrono::steady_clock::now() - tUpload0).count();
     }
@@ -3565,29 +3395,7 @@ void App::uploadVideoTextureB()
     namespace chrono = std::chrono;
     const bool timeUpload = mVideoLogPipelineTiming;
     const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    if (mVideoReaderB->usesGpuNv12Path()) {
-        const int stride = mVideoReaderB->nv12StrideBytes();
-        const int yRows = mVideoReaderB->nv12YTexHeight();
-        const int uvRows = (yRows + 1) / 2;
-        const uint8_t* p = mVideoReaderB->nv12Buffer();
-        const size_t yBytes = static_cast<size_t>(stride) * static_cast<size_t>(yRows);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        glBindTexture(GL_TEXTURE_2D, mVideoTextureB);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, stride, yRows, GL_RED, GL_UNSIGNED_BYTE, p);
-        glBindTexture(GL_TEXTURE_2D, mVideoTextureUvB);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, stride / 2, uvRows, GL_RG, GL_UNSIGNED_BYTE, p + yBytes);
-        if (mVideoNv12DebugMode != 0) {
-            while (GLenum err = glGetError()) {
-                LOGW("uploadVideoTextureB NV12 GL error after subimage: 0x{:x}", static_cast<unsigned>(err));
-            }
-        }
-    } else {
-        glBindTexture(GL_TEXTURE_2D, mVideoTextureB);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mVideoReaderB->width(), mVideoReaderB->height(),
-            GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
-    }
-    glBindTexture(GL_TEXTURE_2D, 0);
+    mVideoReaderB->renderToTexture(mVideoTextureB);
     if (timeUpload) {
         mVideoDbgLastUploadRMs = chrono::duration<float, std::milli>(chrono::steady_clock::now() - tUpload0).count();
     }
@@ -3652,120 +3460,52 @@ void App::renderVideoBlit(const ImGuiIO& io)
 
     mVideoBlitShader.bind();
     const bool cmp = videoCompareActive();
-    const bool anyNv12 = (mVideoReader && mVideoReader->usesGpuNv12Path())
-        || (mVideoReaderB && mVideoReaderB->usesGpuNv12Path());
     constexpr float kVideoTransportPipelineDbgRow = 26.0f;
-    const float transportBarH =
-        (cmp ? 80.0f : 36.0f) + (anyNv12 ? 28.0f : 0.0f) + kVideoTransportPipelineDbgRow;
+    const float transportBarH = (cmp ? 80.0f : 36.0f) + kVideoTransportPipelineDbgRow;
     const float contentH =
         io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
     const Vec2f contentOrigin(0.0f, mToolbarHeight);
     const Vec2f contentSize(io.DisplaySize.x, std::max(1.0f, contentH));
 
-    auto nv12Uniforms = [](const MFVideoReader* r, Vec2f& outY, Vec2f& outChroma) {
-        if (r && r->usesGpuNv12Path()) {
-            const float stride = static_cast<float>(r->nv12StrideBytes());
-            const float yRows = static_cast<float>(r->nv12YTexHeight());
-            const float uvRows = static_cast<float>((r->nv12YTexHeight() + 1) / 2);
-            outY = Vec2f(stride, yRows);
-            outChroma = Vec2f(stride * 0.5f, uvRows);
-        } else {
-            outY = Vec2f(1.0f, 1.0f);
-            outChroma = Vec2f(1.0f, 1.0f);
-        }
-    };
-
-    auto uvBind = [this](const MFVideoReader* r, GLuint slotUv) -> GLuint {
-        return (r && r->usesGpuNv12Path()) ? slotUv : mVideoDummyUvTex;
-    };
-
     mVideoBlitShader.setUniform("uWindowSize", Vec2f(io.DisplaySize.x, io.DisplaySize.y));
     mVideoBlitShader.setUniform("uContentOrigin", contentOrigin);
     mVideoBlitShader.setUniform("uContentSize", contentSize);
-    mVideoBlitShader.setUniform("uNv12Debug", mVideoNv12DebugMode);
 
     if (cmp && mVideoTextureB != 0) {
         const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
-        const GLuint y0 = dispSwap ? mVideoTextureB : mVideoTexture;
-        const GLuint y1 = dispSwap ? mVideoTexture : mVideoTextureB;
-        const GLuint uv0Real = dispSwap ? mVideoTextureUvB : mVideoTextureUv;
-        const GLuint uv1Real = dispSwap ? mVideoTextureUv : mVideoTextureUvB;
-        const MFVideoReader* r0 = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
-        const MFVideoReader* r1 = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+        const GLuint t0 = dispSwap ? mVideoTextureB : mVideoTexture;
+        const GLuint t1 = dispSwap ? mVideoTexture : mVideoTextureB;
+        const MpvGlPlayer* r0 = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+        const MpvGlPlayer* r1 = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
 
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, y0);
+        glBindTexture(GL_TEXTURE_2D, t0);
         glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, y1);
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, uvBind(r0, uv0Real));
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, uvBind(r1, uv1Real));
-
-        Vec2f yTs0, cTs0, yTs1, cTs1;
-        nv12Uniforms(r0, yTs0, cTs0);
-        nv12Uniforms(r1, yTs1, cTs1);
+        glBindTexture(GL_TEXTURE_2D, t1);
 
         mVideoBlitShader.setUniform("uCompareMode", 1);
         mVideoBlitShader.setUniform("uVideo", 0);
         mVideoBlitShader.setUniform("uVideoR", 1);
-        mVideoBlitShader.setUniform("uVideoUv", 2);
-        mVideoBlitShader.setUniform("uVideoUvR", 3);
-        mVideoBlitShader.setUniform("uVideoIsNv12", (r0 && r0->usesGpuNv12Path()) ? 1 : 0);
-        mVideoBlitShader.setUniform("uVideoRIsNv12", (r1 && r1->usesGpuNv12Path()) ? 1 : 0);
-        mVideoBlitShader.setUniform("uVideoYTexSize", yTs0);
-        mVideoBlitShader.setUniform("uVideoChromaTexSize", cTs0);
-        mVideoBlitShader.setUniform("uVideoRYTexSize", yTs1);
-        mVideoBlitShader.setUniform("uVideoRChromaTexSize", cTs1);
         mVideoBlitShader.setUniform("uVideoSize",
             Vec2f(r0 ? r0->displayWidthForAspect() : 1.0f, r0 ? r0->displayHeightForAspect() : 1.0f));
         mVideoBlitShader.setUniform("uVideoSizeR",
             Vec2f(r1 ? r1->displayWidthForAspect() : 1.0f, r1 ? r1->displayHeightForAspect() : 1.0f));
         mVideoBlitShader.setUniform("uSplitPos", mViewSplitPos);
-        const Vec2f pic0(r0 ? static_cast<float>(r0->width()) : 1.0f,
-            r0 ? static_cast<float>(r0->height()) : 1.0f);
-        const Vec2f pic1(r1 ? static_cast<float>(r1->width()) : 1.0f,
-            r1 ? static_cast<float>(r1->height()) : 1.0f);
-        mVideoBlitShader.setUniform("uVideoPicPx", pic0);
-        mVideoBlitShader.setUniform("uVideoRPicPx", pic1);
     } else {
-        const MFVideoReader* r = mVideoReader.get();
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, mVideoTexture);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, mVideoTexture);
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, uvBind(r, mVideoTextureUv));
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, mVideoDummyUvTex);
-
-        Vec2f yTs, cTs;
-        nv12Uniforms(r, yTs, cTs);
 
         mVideoBlitShader.setUniform("uCompareMode", 0);
         mVideoBlitShader.setUniform("uVideo", 0);
         mVideoBlitShader.setUniform("uVideoR", 1);
-        mVideoBlitShader.setUniform("uVideoUv", 2);
-        mVideoBlitShader.setUniform("uVideoUvR", 3);
-        mVideoBlitShader.setUniform("uVideoIsNv12", (r && r->usesGpuNv12Path()) ? 1 : 0);
-        mVideoBlitShader.setUniform("uVideoRIsNv12", 0);
-        mVideoBlitShader.setUniform("uVideoYTexSize", yTs);
-        mVideoBlitShader.setUniform("uVideoChromaTexSize", cTs);
-        mVideoBlitShader.setUniform("uVideoRYTexSize", Vec2f(1.0f, 1.0f));
-        mVideoBlitShader.setUniform("uVideoRChromaTexSize", Vec2f(1.0f, 1.0f));
         mVideoBlitShader.setUniform("uVideoSize",
             Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect()));
         mVideoBlitShader.setUniform("uVideoSizeR",
             Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect()));
-        mVideoBlitShader.setUniform("uVideoPicPx",
-            Vec2f(static_cast<float>(mVideoReader->width()), static_cast<float>(mVideoReader->height())));
-        mVideoBlitShader.setUniform("uVideoRPicPx", Vec2f(1.0f, 1.0f));
     }
     mVideoBlitShader.drawTriangle();
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
@@ -3783,11 +3523,8 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         return;
     }
     const bool cmp = videoCompareActive();
-    const bool anyNv12 = (mVideoReader && mVideoReader->usesGpuNv12Path())
-        || (mVideoReaderB && mVideoReaderB->usesGpuNv12Path());
     constexpr float kVideoTransportPipelineDbgRow = 26.0f;
-    const float barH =
-        (cmp ? 80.0f : 36.0f) + (anyNv12 ? 28.0f : 0.0f) + kVideoTransportPipelineDbgRow;
+    const float barH = (cmp ? 80.0f : 36.0f) + kVideoTransportPipelineDbgRow;
     ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -4054,7 +3791,7 @@ void App::initVideoTransportBar(const ImGuiIO& io)
                         static_cast<double>(mVideoReader->lastSeekSetPosMs()),
                         static_cast<double>(mVideoReader->lastDecodeThroughMs()),
                         mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
-                        static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+                        static_cast<double>(mVideoDbgLastUploadLMs), 0);
                 }
             }
         }
@@ -4089,15 +3826,6 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     }
     ImGui::SameLine();
     ImGui::TextDisabled("seek / decode+buf / upload ms");
-
-    if (anyNv12) {
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(260.0f);
-        ImGui::Combo(
-            "NV12##dbg", &mVideoNv12DebugMode, "Normal\0Luma only\0UV plane (RG)\0\0");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(debug)");
-    }
 
     ImGui::End();
     ImGui::PopStyleVar();

@@ -7,10 +7,11 @@ set(VERSION "0.2.1" CACHE STRING " " FORCE)
 option(USE_NVTX "Use NVidia Tool Extensions" OFF)
 option(USE_OPENEXR "Use OpenEXR" OFF)
 option(EMBED_SHADERS "Embed shaders into binary" ON)
+# Windows: ON by default (requires libmpv: MPV_ROOT or MPV_INCLUDE_DIR + MPV_LIBRARY). Set OFF to build without video.
 if(WIN32)
-    option(USE_VIDEO "Windows Media Foundation video playback prototype" ON)
+    option(USE_VIDEO "Video playback via libmpv (OpenGL render)" ON)
 else()
-    option(USE_VIDEO "Windows Media Foundation video playback prototype" OFF)
+    option(USE_VIDEO "Video playback via libmpv (OpenGL render)" OFF)
 endif()
 
 if(USE_OPENEXR AND NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/ext/openexr/OpenEXR")

@@ -3,6 +3,7 @@ msvc/build
 # CMake out-of-source build trees (CMakeCache, generated .vcxproj, MSBuild *.tlog, etc.)
 build/
 build-novideo/
+build_mpv_test/
 
 # MSBuild trace logs (incremental compile state; not source)
 *.tlog
@@ -62,3 +63,7 @@ vc_build/
 # imgui
 imgui_log.txt
 imgui*.ini
+
+# libmpv Windows SDK (local extract of shinchiro mpv-dev *.7z; see third_party/mpv/README.md)
+third_party/mpv/*
+!third_party/mpv/README.md

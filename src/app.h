@@ -3,7 +3,7 @@
 
 #include "common.h"
 #include "image.h"
-#include "mf_video_reader.h"
+#include "mpv_gl_player.h"
 #include "shader.h"
 #include "texture.h"
 #include "texture_pool.h"
@@ -335,8 +335,8 @@ private:
     int         mVideoLazyDurationGraceFrames = 0;
     double      mVideoPlaybackTimeBank = 0.0;
     double      mVideoScrubValue = 0.0;
-    std::unique_ptr<MFVideoReader> mVideoReader;
-    std::unique_ptr<MFVideoReader> mVideoReaderB;
+    std::unique_ptr<MpvGlPlayer> mVideoReader;
+    std::unique_ptr<MpvGlPlayer> mVideoReaderB;
     std::vector<std::string> mVideoPaths;
     int         mVideoIndexL = -1;
     int         mVideoIndexR = -1;
@@ -344,16 +344,13 @@ private:
     std::string mVideoPathR;
     GLuint      mVideoTexture = 0;
     GLuint      mVideoTextureB = 0;
-    GLuint      mVideoTextureUv = 0;
-    GLuint      mVideoTextureUvB = 0;
-    GLuint      mVideoDummyUvTex = 0;
     double      mVideoCompositionT = 0.0;
     double      mVideoStartL = 0.0;
     double      mVideoStartR = 0.0;
     // Last targets used in syncVideoDecodersToCompositionT (skip redundant seek/decode when unchanged).
     double      mVideoLastSyncedTargetMediaL = -1.0;
     double      mVideoLastSyncedTargetMediaR = -1.0;
-    // ImGui::GetTime() of last scrub seek+decode; throttles expensive MF work while dragging the slider.
+    // ImGui::GetTime() of last scrub seek+decode; throttles decode work while dragging the slider.
     double      mVideoLastScrubDecodeTime = -1.0e9;
     bool        mVideoLogPipelineTiming = false;
     float       mVideoDbgLastUploadLMs = 0.f;
@@ -362,14 +359,8 @@ private:
     // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
     // remain in their original slots (mVideoReader/mVideoReaderB).
     bool        mVideoSwapPresentationLR = false;
-    // Video transport: NV12 debug view (0=normal, 1=Y luma, 2=UV plane as RG).
-    int         mVideoNv12DebugMode = 0;
     Shader      mVideoBlitShader;
     bool        mVideoShaderReady = false;
-
-#if defined(_WIN32) && defined(USE_VIDEO)
-    bool        mVideoComInitialized = false;
-#endif
 };
 
 }  // namespace baktsiu
