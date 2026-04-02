@@ -334,8 +334,7 @@ private:
     // Defer lazy duration probe so the first paint after open is not blocked by a full-stream read.
     int         mVideoLazyDurationGraceFrames = 0;
     double      mVideoPlaybackTimeBank = 0.0;
-    // Compare play: wall-time accumulator; syncVideoDecodersToCompositionT runs when this reaches a frame step.
-    double      mVideoCompareSyncAccumulator = 0.0;
+    double      mVideoComparePlaybackBank = 0.0;
     double      mVideoScrubValue = 0.0;
     std::unique_ptr<MpvGlPlayer> mVideoReader;
     std::unique_ptr<MpvGlPlayer> mVideoReaderB;
@@ -354,9 +353,16 @@ private:
     double      mVideoLastSyncedTargetMediaR = -1.0;
     // ImGui::GetTime() of last scrub seek+decode; throttles decode work while dragging the slider.
     double      mVideoLastScrubDecodeTime = -1.0e9;
+    // Snapshot when a scrub drag begins; used to resume playback after release if it was playing.
+    bool        mVideoPlayingBeforeScrub = false;
     bool        mVideoLogPipelineTiming = false;
     float       mVideoDbgLastUploadLMs = 0.f;
     float       mVideoDbgLastUploadRMs = 0.f;
+    float       mVideoDbgLastSyncMs = 0.f;
+    float       mVideoDbgLastTickDtMs = 0.f;
+    float       mVideoDbgLastDriftLMs = 0.f;
+    float       mVideoDbgLastDriftRMs = 0.f;
+    double      mVideoDbgLastConsoleBeatSec = -1.0e9;
     // Presentation-only left/right swap for instant switching while playing.
     // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
     // remain in their original slots (mVideoReader/mVideoReaderB).

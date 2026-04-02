@@ -63,6 +63,8 @@ endif()
 
 add_executable(${PROJECT_NAME} ${SRC_FILES} ${IMGUI_SRC_FILES} 
                ${GL3W_SRC_FILES} ${DOCOPT_SRC_FILES} ${EXTRA_SRC_FILES})
+# Video pipeline UI/logging and other debug-only hooks: Debug config only (not RelWithDebInfo / Release).
+target_compile_definitions(${PROJECT_NAME} PRIVATE $<$<CONFIG:Debug>:BAKTSIU_DEBUG_BUILD=1>)
 source_group("External Files\\gl3w"   FILES ${GL3W_SRC_FILES})
 source_group("External Files\\imgui"  FILES ${IMGUI_SRC_FILES})
 source_group("External Files\\docopt" FILES ${DOCOPT_SRC_FILES})

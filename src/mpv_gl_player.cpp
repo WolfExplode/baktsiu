@@ -451,7 +451,8 @@ void MpvGlPlayer::applySeek(double targetSec, int maxReadSamplesCap)
 
     if (!m_logTiming) {
         mpv_command(mpv, args);
-        drainEvents(0.05);
+        // Compare mode syncs every UI frame on two players; 50ms drains per seek feel like heavy lag.
+        drainEvents(0.0);
         m_lastSeekMs = 0.f;
         m_lastSeekFlushMs = 0.f;
         m_lastSeekSetPosMs = 0.f;

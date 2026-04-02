@@ -146,22 +146,6 @@ bool Splitter(bool split_vertically, float thickness, float* size1, float* size2
     return SplitterBehavior(bb, id, split_vertically ? ImGuiAxis_X : ImGuiAxis_Y, size1, size2, min_size1, min_size2, 0.0f);
 }
 
-#if defined(USE_VIDEO)
-// Declared early for onKeyPressed; same logic as the helper next to other video utilities below.
-double comparePlaybackFrameStepSec(const baktsiu::MpvGlPlayer* l, const baktsiu::MpvGlPlayer* r)
-{
-    double a = (l && l->isOpen()) ? l->frameDurationSec() : (1.0 / 30.0);
-    double b = (r && r->isOpen()) ? r->frameDurationSec() : (1.0 / 30.0);
-    if (a < 1e-6 || a > 1.0) {
-        a = 1.0 / 30.0;
-    }
-    if (b < 1e-6 || b > 1.0) {
-        b = 1.0 / 30.0;
-    }
-    return (std::min)(a, b);
-}
-#endif
-
 }  // namespace anonymous
 
 namespace ImGui 
@@ -905,10 +889,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
         if (mVideoMode && mVideoReader && mVideoReader->isOpen() && !io.WantTextInput) {
             mVideoPlaying ^= true;
             mVideoPlaybackTimeBank = 0.0;
-            if (mVideoPlaying && videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()) {
-                mVideoCompareSyncAccumulator =
-                    comparePlaybackFrameStepSec(mVideoReader.get(), mVideoReaderB.get());
-            }
+            mVideoComparePlaybackBank = 0.0;
         }
 #endif
     } else if (ImGui::IsKeyPressed(0x51)) { // q
@@ -2684,6 +2665,19 @@ constexpr double kVideoScrubUnknownMaxSec = 3600.0 * 24.0;  // 24h upper composi
 constexpr double kVideoForwardKeyframeSeekMaxSec = 1.35;
 // Cap real-time delta fed into playback clocks so a blocking open / hitch does not schedule many decodes in one UI frame.
 constexpr double kVideoPlaybackWallDtCapSec = 0.25;
+constexpr int kVideoMaxCompareStepsPerTick = 8;
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+inline bool videoPipelineDbgEnabled(bool userFlag)
+{
+    return userFlag;
+}
+#else
+inline bool videoPipelineDbgEnabled(bool)
+{
+    return false;
+}
+#endif
 
 double videoScrubSpanSec(const MpvGlPlayer* r)
 {
@@ -2724,6 +2718,15 @@ double mediaSyncEpsilonSec(const MpvGlPlayer* r)
         fd = 1.0 / 30.0;
     }
     return (std::max)(1e-4, fd * 0.25);
+}
+
+double saneFrameDurSec(const MpvGlPlayer* r)
+{
+    double fd = (r && r->isOpen()) ? r->frameDurationSec() : 0.0;
+    if (fd < 1e-6 || fd > 1.0) {
+        fd = 1.0 / 30.0;
+    }
+    return fd;
 }
 
 struct VideoScrubDecodeHint {
@@ -2811,10 +2814,14 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
     (void)maxDecodeReadCapPerStream;
     return;
 #else
+#if defined(BAKTSIU_DEBUG_BUILD)
+    namespace chrono = std::chrono;
+    const auto tSync0 = chrono::steady_clock::now();
+#endif
     if (!mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
-    if (mVideoLogPipelineTiming) {
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
         mVideoDbgLastUploadLMs = 0.f;
         mVideoDbgLastUploadRMs = 0.f;
     }
@@ -2822,6 +2829,8 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
     bool ranDecodeR = false;
     const double dL = videoScrubSpanSec(mVideoReader.get());
     const double tL = mediaTimeFromComposition(mVideoCompositionT, mVideoStartL, dL);
+    double tR = 0.0;
+    bool hasR = false;
     const double epsL = mediaSyncEpsilonSec(mVideoReader.get());
     const bool needL = (mVideoLastSyncedTargetMediaL < 0.0)
         || (std::fabs(tL - mVideoLastSyncedTargetMediaL) > epsL);
@@ -2838,7 +2847,8 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
     }
     if (videoCompareActive()) {
         const double dR = videoScrubSpanSec(mVideoReaderB.get());
-        const double tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
+        tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
+        hasR = true;
         const double epsR = mediaSyncEpsilonSec(mVideoReaderB.get());
         const bool needR = (mVideoLastSyncedTargetMediaR < 0.0)
             || (std::fabs(tR - mVideoLastSyncedTargetMediaR) > epsR);
@@ -2854,7 +2864,7 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
     } else {
         mVideoLastSyncedTargetMediaR = -1.0;
     }
-    if (mVideoLogPipelineTiming && (ranDecodeL || ranDecodeR)) {
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming) && (ranDecodeL || ranDecodeR)) {
         if (ranDecodeL) {
             LOGI(
                 "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
@@ -2878,6 +2888,22 @@ void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
                 static_cast<double>(mVideoDbgLastUploadRMs), 0);
         }
     }
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+    // Post-sync debug: how far mpv's reported time-pos is from our target (ms).
+    {
+        const double posL = (mVideoReader && mVideoReader->isOpen()) ? mVideoReader->positionSec() : 0.0;
+        mVideoDbgLastDriftLMs = static_cast<float>((posL - tL) * 1000.0);
+        if (hasR && mVideoReaderB && mVideoReaderB->isOpen()) {
+            const double posR = mVideoReaderB->positionSec();
+            mVideoDbgLastDriftRMs = static_cast<float>((posR - tR) * 1000.0);
+        } else {
+            mVideoDbgLastDriftRMs = 0.f;
+        }
+    }
+    mVideoDbgLastSyncMs =
+        chrono::duration<float, std::milli>(chrono::steady_clock::now() - tSync0).count();
+#endif
 #endif
 }
 
@@ -2886,8 +2912,7 @@ void App::resetVideoDecoderSyncCache()
     mVideoLastSyncedTargetMediaL = -1.0;
     mVideoLastSyncedTargetMediaR = -1.0;
     mVideoLastScrubDecodeTime = -1.0e9;
-    // Next compare play tick will sync immediately (accumulator + dt crosses frame step).
-    mVideoCompareSyncAccumulator = 1.0 / 30.0;
+    mVideoComparePlaybackBank = 0.0;
 }
 
 void App::stepVideoScrubFiveSeconds(int direction)
@@ -2902,6 +2927,7 @@ void App::stepVideoScrubFiveSeconds(int direction)
     constexpr double kJumpSec = 5.0;
     mVideoPlaying = false;
     mVideoPlaybackTimeBank = 0.0;
+    mVideoComparePlaybackBank = 0.0;
     if (videoCompareActive()) {
         mVideoCompositionT += static_cast<double>(direction) * kJumpSec;
         clampVideoCompositionT();
@@ -2926,13 +2952,13 @@ void App::stepVideoScrubFiveSeconds(int direction)
     } else if (newPos > tMax) {
         newPos = tMax;
     }
-    if (mVideoLogPipelineTiming) {
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
         mVideoDbgLastUploadLMs = 0.f;
     }
     mVideoReader->seek(newPos);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
-    if (mVideoLogPipelineTiming) {
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
         LOGI(
             "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
             "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
@@ -2958,6 +2984,7 @@ void App::stepVideoScrubOneFrame(int direction)
     }
     mVideoPlaying = false;
     mVideoPlaybackTimeBank = 0.0;
+    mVideoComparePlaybackBank = 0.0;
     if (videoCompareActive()) {
         double stepA = mVideoReader->frameDurationSec();
         double stepB =
@@ -2992,7 +3019,7 @@ void App::stepVideoScrubOneFrame(int direction)
     } else if (newPos > tMax) {
         newPos = tMax;
     }
-    if (mVideoLogPipelineTiming) {
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
         mVideoDbgLastUploadLMs = 0.f;
     }
     // Small forward steps: seek(..., false) uses keyframe-style seek in mpv; large/backward use exact seek.
@@ -3002,7 +3029,7 @@ void App::stepVideoScrubOneFrame(int direction)
     mVideoReader->seek(newPos, !forwardCatchup);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
-    if (mVideoLogPipelineTiming) {
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
         LOGI(
             "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
             "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
@@ -3191,10 +3218,10 @@ void App::openVideosFromSelection()
     mVideoReader = std::move(readerL);
     mVideoReaderB = std::move(readerR);
     if (mVideoReader) {
-        mVideoReader->setPipelineTimingLog(mVideoLogPipelineTiming);
+        mVideoReader->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
     }
     if (mVideoReaderB) {
-        mVideoReaderB->setPipelineTimingLog(mVideoLogPipelineTiming);
+        mVideoReaderB->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
     }
     mVideoMode = true;
     mVideoPlaying = true;
@@ -3411,7 +3438,7 @@ void App::uploadVideoTexture()
         return;
     }
     namespace chrono = std::chrono;
-    const bool timeUpload = mVideoLogPipelineTiming;
+    const bool timeUpload = videoPipelineDbgEnabled(mVideoLogPipelineTiming);
     const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
     mVideoReader->renderToTexture(mVideoTexture);
     if (timeUpload) {
@@ -3429,7 +3456,7 @@ void App::uploadVideoTextureB()
         return;
     }
     namespace chrono = std::chrono;
-    const bool timeUpload = mVideoLogPipelineTiming;
+    const bool timeUpload = videoPipelineDbgEnabled(mVideoLogPipelineTiming);
     const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
     mVideoReaderB->renderToTexture(mVideoTextureB);
     if (timeUpload) {
@@ -3447,26 +3474,69 @@ void App::tickAndUploadVideoFrame(float deltaTime)
     if (!mVideoPlaying || !mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
+#if defined(BAKTSIU_DEBUG_BUILD)
+    mVideoDbgLastTickDtMs = static_cast<float>(static_cast<double>(deltaTime) * 1000.0);
+#endif
     if (videoCompareActive()) {
         double tMin = 0.0;
         double tMax = 1.0;
         recomputeVideoScrubBounds(tMin, tMax);
+        // Compare playback: do NOT seek every frame. Frame-step both players according to a shared
+        // playback bank (like single-video mode), then render once per tick.
+        const double stepA = saneFrameDurSec(mVideoReader.get());
+        const double stepB = saneFrameDurSec(mVideoReaderB.get());
+        const double step = (std::min)(stepA, stepB);
+
         const double dt = (std::min)(static_cast<double>(deltaTime), kVideoPlaybackWallDtCapSec);
-        mVideoCompositionT += dt;
+        mVideoComparePlaybackBank += dt;
+        int n = static_cast<int>(std::floor((mVideoComparePlaybackBank / step) + 1e-9));
+        if (n > kVideoMaxCompareStepsPerTick) {
+            n = kVideoMaxCompareStepsPerTick;
+        }
+        if (n > 0) {
+            mVideoComparePlaybackBank -= static_cast<double>(n) * step;
+        }
+
+        // Our composition clock follows the number of steps we actually issued.
+        mVideoCompositionT += static_cast<double>(n) * step;
         constexpr double kEndEps = 1.0 / 240.0;
         if (mVideoCompositionT >= tMax - kEndEps) {
             mVideoCompositionT = tMax;
             mVideoPlaying = false;
-            mVideoCompareSyncAccumulator = 0.0;
+            mVideoComparePlaybackBank = 0.0;
         }
         clampVideoCompositionT();
-        const double frameStep =
-            comparePlaybackFrameStepSec(mVideoReader.get(), mVideoReaderB.get());
-        mVideoCompareSyncAccumulator += dt;
-        if (mVideoCompareSyncAccumulator >= frameStep) {
-            mVideoCompareSyncAccumulator -= frameStep;
-            syncVideoDecodersToCompositionT();
+        if (n > 0) {
+            // Step both streams; keep them in lockstep in "displayed frames", not absolute time.
+            for (int i = 0; i < n; ++i) {
+                (void)mVideoReader->decodeFrame(true);
+                if (mVideoReaderB && mVideoReaderB->isOpen()) {
+                    (void)mVideoReaderB->decodeFrame(true);
+                }
+            }
+            uploadVideoTexture();
+            uploadVideoTextureB();
         }
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+        // Console-friendly summary (copy/paste) for diagnosing compare playback lag.
+        if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+            const double now = ImGui::GetTime();
+            if (now - mVideoDbgLastConsoleBeatSec >= 1.0) {
+                mVideoDbgLastConsoleBeatSec = now;
+                const double posL = (mVideoReader && mVideoReader->isOpen()) ? mVideoReader->positionSec() : 0.0;
+                const double posR =
+                    (mVideoReaderB && mVideoReaderB->isOpen()) ? mVideoReaderB->positionSec() : 0.0;
+                LOGI("[video-compare] dt={:.1f}ms sync={:.1f}ms driftL={:+.1f}ms driftR={:+.1f}ms "
+                     "T={:.3f}s posL={:.3f}s posR={:.3f}s readCap={}",
+                    static_cast<double>(mVideoDbgLastTickDtMs),
+                    static_cast<double>(mVideoDbgLastSyncMs),
+                    static_cast<double>(mVideoDbgLastDriftLMs),
+                    static_cast<double>(mVideoDbgLastDriftRMs),
+                    mVideoCompositionT, posL, posR, n);
+            }
+        }
+#endif
         return;
     }
     double frameDur = mVideoReader->frameDurationSec();
@@ -3515,7 +3585,11 @@ void App::renderVideoBlit(const ImGuiIO& io)
 
     mVideoBlitShader.bind();
     const bool cmp = videoCompareActive();
+#if defined(BAKTSIU_DEBUG_BUILD)
     constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
     const float transportBarH = (cmp ? 80.0f : 36.0f) + kVideoTransportPipelineDbgRow;
     const float contentH =
         io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
@@ -3578,7 +3652,11 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         return;
     }
     const bool cmp = videoCompareActive();
+#if defined(BAKTSIU_DEBUG_BUILD)
     constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
     const float barH = (cmp ? 80.0f : 36.0f) + kVideoTransportPipelineDbgRow;
     ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
@@ -3590,10 +3668,7 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     if (ImGui::Button(mVideoPlaying ? "Pause" : "Play")) {
         mVideoPlaying ^= true;
         mVideoPlaybackTimeBank = 0.0;
-        if (mVideoPlaying && cmp && mVideoReaderB && mVideoReaderB->isOpen()) {
-            mVideoCompareSyncAccumulator =
-                comparePlaybackFrameStepSec(mVideoReader.get(), mVideoReaderB.get());
-        }
+        mVideoComparePlaybackBank = 0.0;
     }
     ImGui::SameLine();
     if (ImGui::Button("Close")) {
@@ -3659,6 +3734,9 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
         const bool itemDeactivated = ImGui::IsItemDeactivated();
+        if (itemActivated) {
+            mVideoPlayingBeforeScrub = mVideoPlaying;
+        }
         if (itemActive || itemActivated || valueChanged || itemClicked || itemDeactivated) {
             mVideoCompositionT = mVideoScrubValue;
             clampVideoCompositionT();
@@ -3669,6 +3747,11 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             if (scrubHint.run) {
                 syncVideoDecodersToCompositionT(scrubHint.maxReadCapPerStream);
             }
+        }
+        if (itemDeactivated && mVideoPlayingBeforeScrub) {
+            mVideoPlaying = true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
         }
         if (!itemActive) {
             mVideoScrubValue = mVideoCompositionT;
@@ -3832,6 +3915,9 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
         const bool itemDeactivated = ImGui::IsItemDeactivated();
+        if (itemActivated) {
+            mVideoPlayingBeforeScrub = mVideoPlaying;
+        }
         if (itemActive || itemActivated || valueChanged || itemClicked || itemDeactivated) {
             mVideoPlaybackTimeBank = 0.0;
             mVideoPlaying = false;
@@ -3841,7 +3927,7 @@ void App::initVideoTransportBar(const ImGuiIO& io)
                 mVideoReader->seek(mVideoScrubValue, scrubHint.maxReadCapPerStream <= 0);
                 mVideoReader->decodeFrameThrough(mVideoScrubValue, scrubHint.maxReadCapPerStream);
                 uploadVideoTexture();
-                if (mVideoLogPipelineTiming) {
+                if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
                     LOGI(
                         "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) "
                         "decode+buf={:.2f}ms reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
@@ -3853,6 +3939,11 @@ void App::initVideoTransportBar(const ImGuiIO& io)
                         static_cast<double>(mVideoDbgLastUploadLMs), 0);
                 }
             }
+        }
+        if (itemDeactivated && mVideoPlayingBeforeScrub) {
+            mVideoPlaying = true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
         }
         if (!itemActive) {
             mVideoScrubValue = mVideoReader->positionSec();
@@ -3874,17 +3965,29 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         }
     }
 
+#if defined(BAKTSIU_DEBUG_BUILD)
     ImGui::Separator();
     if (ImGui::Checkbox("Log pipeline (console)##videopipe", &mVideoLogPipelineTiming)) {
         if (mVideoReader) {
-            mVideoReader->setPipelineTimingLog(mVideoLogPipelineTiming);
+            mVideoReader->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
         }
         if (mVideoReaderB) {
-            mVideoReaderB->setPipelineTimingLog(mVideoLogPipelineTiming);
+            mVideoReaderB->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
         }
     }
     ImGui::SameLine();
     ImGui::TextDisabled("seek / decode+buf / upload ms");
+    ImGui::SameLine();
+    if (videoCompareActive()) {
+        ImGui::TextDisabled("dt %.1fms sync %.1fms drift L %+0.1fms R %+0.1fms",
+            static_cast<double>(mVideoDbgLastTickDtMs),
+            static_cast<double>(mVideoDbgLastSyncMs),
+            static_cast<double>(mVideoDbgLastDriftLMs),
+            static_cast<double>(mVideoDbgLastDriftRMs));
+    } else {
+        ImGui::TextDisabled("dt %.1fms", static_cast<double>(mVideoDbgLastTickDtMs));
+    }
+#endif
 
     ImGui::End();
     ImGui::PopStyleVar();
