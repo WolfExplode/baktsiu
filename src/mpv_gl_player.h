@@ -56,13 +56,16 @@ public:
 private:
     void destroyMpv();
     bool createRenderContext();
-    bool waitFileLoaded();
+    bool waitFileLoaded(GLuint scratchRgbTex);
     void drainEvents(double timeoutSec);
     void refreshDuration();
     void refreshFrameDuration();
     void refreshTimePos();
     void refreshVideoGeometry();
     void applySeek(double targetSec, int maxReadSamplesCap);
+    void pumpRenderContext();
+    // Fixed-size FBO blit for open-time pumping when video-params/w*h are not ready yet.
+    void renderToFbo(GLuint texture, int w, int h);
     static std::string normalizeFsPath(const std::string& utf8Path);
 
     GLFWwindow* m_window = nullptr;

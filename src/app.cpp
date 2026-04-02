@@ -2662,6 +2662,8 @@ namespace
 constexpr double kVideoScrubUnknownMaxSec = 3600.0 * 24.0;  // 24h upper composition bound when duration unknown
 // Small forward frame steps: prefer keyframe-style seek below this delta (see seek(..., false)).
 constexpr double kVideoForwardKeyframeSeekMaxSec = 1.35;
+// Cap real-time delta fed into playback clocks so a blocking open / hitch does not schedule many decodes in one UI frame.
+constexpr double kVideoPlaybackWallDtCapSec = 0.25;
 
 double videoScrubSpanSec(const MpvGlPlayer* r)
 {
@@ -3108,6 +3110,12 @@ void App::openVideosFromSelection()
         }
     }
 
+    if (idxR >= 0) {
+        LOGI("[video-open] selection n={} idxL={} idxR={} (dual/compare) L=\"{}\" R=\"{}\"", n, idxL, idxR, pathL, pathR);
+    } else {
+        LOGI("[video-open] selection n={} idxL={} idxR=-1 (single) L=\"{}\"", n, idxL, pathL);
+    }
+
     auto readerL = std::make_unique<MpvGlPlayer>();
     std::unique_ptr<MpvGlPlayer> readerR;
     bool openedL = false;
@@ -3184,10 +3192,16 @@ void App::openVideosFromSelection()
     mVideoCompositionT = tMin;
     mVideoScrubValue = mVideoCompositionT;
 
-    recreateVideoTexture();
-    recreateVideoTextureB();
-    resetVideoDecoderSyncCache();
-    syncVideoDecodersToCompositionT();
+    {
+        namespace chrono = std::chrono;
+        const auto tTexSync0 = chrono::steady_clock::now();
+        recreateVideoTexture();
+        recreateVideoTextureB();
+        resetVideoDecoderSyncCache();
+        syncVideoDecodersToCompositionT();
+        LOGI("[video-open] recreate textures + first syncVideoDecodersToCompositionT: {:.3f}s", //
+            chrono::duration<double>(chrono::steady_clock::now() - tTexSync0).count());
+    }
 
     mVideoLazyDurationGraceFrames = 0;
     if (mVideoReader && mVideoReader->isOpen() && mVideoReader->durationSec() <= 0.001) {
@@ -3415,7 +3429,8 @@ void App::tickAndUploadVideoFrame(float deltaTime)
         double tMin = 0.0;
         double tMax = 1.0;
         recomputeVideoScrubBounds(tMin, tMax);
-        mVideoCompositionT += static_cast<double>(deltaTime);
+        const double dt = (std::min)(static_cast<double>(deltaTime), kVideoPlaybackWallDtCapSec);
+        mVideoCompositionT += dt;
         constexpr double kEndEps = 1.0 / 240.0;
         if (mVideoCompositionT >= tMax - kEndEps) {
             mVideoCompositionT = tMax;
@@ -3429,15 +3444,22 @@ void App::tickAndUploadVideoFrame(float deltaTime)
     if (frameDur < 1e-6 || frameDur > 1.0) {
         frameDur = 1.0 / 30.0;
     }
-    mVideoPlaybackTimeBank += static_cast<double>(deltaTime);
-    while (mVideoPlaybackTimeBank >= frameDur) {
+    const double dt = (std::min)(static_cast<double>(deltaTime), kVideoPlaybackWallDtCapSec);
+    mVideoPlaybackTimeBank += dt;
+    // Avoid unbounded bank if UI tick rate is slower than video frame rate.
+    const double bankCap = (std::max)(4.0 * frameDur, kVideoPlaybackWallDtCapSec);
+    if (mVideoPlaybackTimeBank > bankCap) {
+        mVideoPlaybackTimeBank = bankCap;
+    }
+    // One decode per UI frame max: after a stall, catch-up spreads across frames instead of freezing input.
+    if (mVideoPlaybackTimeBank >= frameDur) {
         mVideoPlaybackTimeBank -= frameDur;
         if (!mVideoReader->decodeFrame()) {
             mVideoPlaybackTimeBank = 0.0;
             mVideoPlaying = false;
-            break;
+        } else {
+            uploadVideoTexture();
         }
-        uploadVideoTexture();
     }
 #endif
 }

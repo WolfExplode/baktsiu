@@ -1,5 +1,7 @@
 #include "mpv_gl_player.h"
 
+#include "common.h"
+
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
@@ -24,6 +26,36 @@ namespace baktsiu
 namespace
 {
 constexpr double kOpenTimeoutSec = 60.0;
+
+const char* mpvEventIdLabel(mpv_event_id id)
+{
+    switch (id) {
+    case MPV_EVENT_NONE:
+        return "NONE";
+    case MPV_EVENT_SHUTDOWN:
+        return "SHUTDOWN";
+    case MPV_EVENT_LOG_MESSAGE:
+        return "LOG_MESSAGE";
+    case MPV_EVENT_START_FILE:
+        return "START_FILE";
+    case MPV_EVENT_END_FILE:
+        return "END_FILE";
+    case MPV_EVENT_FILE_LOADED:
+        return "FILE_LOADED";
+    case MPV_EVENT_IDLE:
+        return "IDLE";
+    case MPV_EVENT_TICK:
+        return "TICK";
+    case MPV_EVENT_VIDEO_RECONFIG:
+        return "VIDEO_RECONFIG";
+    case MPV_EVENT_AUDIO_RECONFIG:
+        return "AUDIO_RECONFIG";
+    case MPV_EVENT_PROPERTY_CHANGE:
+        return "PROPERTY_CHANGE";
+    default:
+        return "OTHER";
+    }
+}
 
 void* mpvGlGetProcAddress(void* /*ctx*/, const char* name)
 {
@@ -137,31 +169,63 @@ void MpvGlPlayer::drainEvents(double timeoutSec)
     }
 }
 
-bool MpvGlPlayer::waitFileLoaded()
+void MpvGlPlayer::pumpRenderContext()
+{
+    auto* mrc = static_cast<mpv_render_context*>(m_mrc);
+    if (mrc) {
+        (void)mpv_render_context_update(mrc);
+    }
+}
+
+bool MpvGlPlayer::waitFileLoaded(GLuint scratchRgbTex)
 {
     auto* mpv = static_cast<mpv_handle*>(m_mpv);
     if (!mpv) {
         return false;
     }
     const double t0 = glfwGetTime();
+    int nonNoneCount = 0;
+    const char* lastNonNone = "(none)";
+    double lastBeat = t0;
     while (glfwGetTime() - t0 < kOpenTimeoutSec) {
+        pumpRenderContext();
+        if (scratchRgbTex != 0U) {
+            renderToFbo(scratchRgbTex, 640, 360);
+        }
         mpv_event* ev = mpv_wait_event(mpv, 0.2);
         if (ev->event_id == MPV_EVENT_NONE) {
+            const double now = glfwGetTime();
+            if (now - lastBeat >= 1.0) {
+                lastBeat = now;
+                LOGI(
+                    "[mpv-open] wait FILE_LOADED: {:.1f}s elapsed (non-none events: {}, last: {}, scratchTex={})",
+                    now - t0, nonNoneCount, lastNonNone, scratchRgbTex != 0U ? 1 : 0);
+            }
             continue;
         }
+        lastNonNone = mpvEventIdLabel(ev->event_id);
+        ++nonNoneCount;
+        if (nonNoneCount <= 16) {
+            LOGI("[mpv-open] mpv event #{}: {} ({})", nonNoneCount, lastNonNone, static_cast<int>(ev->event_id));
+        }
         if (ev->event_id == MPV_EVENT_FILE_LOADED) {
+            LOGI("[mpv-open] FILE_LOADED after {:.3f}s ({} non-none events)", glfwGetTime() - t0, nonNoneCount);
             return true;
         }
         if (ev->event_id == MPV_EVENT_END_FILE) {
             auto* ef = static_cast<mpv_event_end_file*>(ev->data);
             if (ef && ef->reason != MPV_END_FILE_REASON_REDIRECT) {
+                LOGW("[mpv-open] END_FILE reason={} after {:.3f}s", static_cast<int>(ef->reason), glfwGetTime() - t0);
                 return false;
             }
         }
         if (ev->event_id == MPV_EVENT_SHUTDOWN) {
+            LOGW("[mpv-open] SHUTDOWN while waiting for load after {:.3f}s", glfwGetTime() - t0);
             return false;
         }
     }
+    LOGW("[mpv-open] timeout waiting FILE_LOADED ({:.1f}s, {} non-none, last: {})", kOpenTimeoutSec, nonNoneCount,
+        lastNonNone);
     return false;
 }
 
@@ -233,14 +297,21 @@ void MpvGlPlayer::refreshVideoGeometry()
 
 bool MpvGlPlayer::open(GLFWwindow* window, const std::string& utf8Path)
 {
+    namespace chrono = std::chrono;
+    const auto wallOpen0 = chrono::steady_clock::now();
+
     close();
     if (!window || utf8Path.empty()) {
         return false;
     }
     m_window = window;
 
+    const std::string path = normalizeFsPath(utf8Path);
+    LOGI("[mpv-open] begin \"{}\"", path);
+
     mpv_handle* mpv = mpv_create();
     if (!mpv) {
+        LOGW("[mpv-open] mpv_create failed");
         return false;
     }
     m_mpv = mpv;
@@ -255,43 +326,87 @@ bool MpvGlPlayer::open(GLFWwindow* window, const std::string& utf8Path)
     mpv_set_option_string(mpv, "hwdec", "auto-safe");
 
     if (mpv_initialize(mpv) < 0) {
+        LOGW("[mpv-open] mpv_initialize failed");
         destroyMpv();
         return false;
     }
 
     if (!createRenderContext()) {
+        LOGW("[mpv-open] mpv_render_context_create failed");
         destroyMpv();
         return false;
     }
+    GLuint scratchRgb = 0U;
+    glGenTextures(1, &scratchRgb);
+    if (scratchRgb != 0U) {
+        glBindTexture(GL_TEXTURE_2D, scratchRgb);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 640, 360, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 
-    const std::string path = normalizeFsPath(utf8Path);
     const char* cmd[] = {"loadfile", path.c_str(), "replace", nullptr};
     if (mpv_command(mpv, cmd) < 0) {
+        LOGW("[mpv-open] loadfile command failed");
+        if (scratchRgb != 0U) {
+            glDeleteTextures(1, &scratchRgb);
+        }
+        destroyMpv();
+        return false;
+    }
+    LOGI("[mpv-open] loadfile issued, waiting...");
+
+    if (!waitFileLoaded(scratchRgb)) {
+        if (scratchRgb != 0U) {
+            glDeleteTextures(1, &scratchRgb);
+        }
         destroyMpv();
         return false;
     }
 
-    if (!waitFileLoaded()) {
-        destroyMpv();
-        return false;
-    }
-
+    const auto tGeom0 = chrono::steady_clock::now();
+    int geomItersUsed = 200;
     for (int i = 0; i < 200; ++i) {
+        pumpRenderContext();
+        if (scratchRgb != 0U) {
+            renderToFbo(scratchRgb, 640, 360);
+        }
         refreshDuration();
         refreshFrameDuration();
         refreshVideoGeometry();
         if (m_width > 0 && m_height > 0) {
+            geomItersUsed = i + 1;
             break;
+        }
+        if (i == 0 || i == 50 || i == 100 || i == 199) {
+            LOGI("[mpv-open] geometry probe iter {}: size {}x{} durRel={} {:.3f}s", i, m_width, m_height,
+                m_durationReliable ? 1 : 0,
+                chrono::duration<double>(chrono::steady_clock::now() - tGeom0).count());
         }
         drainEvents(0.05);
     }
 
-    if (m_width <= 0 || m_height <= 0) {
+    if (scratchRgb != 0U) {
+        glDeleteTextures(1, &scratchRgb);
+    }
+
+    const bool usedGeomFallback = (m_width <= 0 || m_height <= 0);
+    if (usedGeomFallback) {
         m_width = 640;
         m_height = 360;
+        LOGW("[mpv-open] video-params never appeared; using fallback 640x360 after {} iters ({:.3f}s)", geomItersUsed,
+            chrono::duration<double>(chrono::steady_clock::now() - tGeom0).count());
+    } else {
+        LOGI("[mpv-open] geometry ok {}x{} after {} iters ({:.3f}s)", m_width, m_height, geomItersUsed,
+            chrono::duration<double>(chrono::steady_clock::now() - tGeom0).count());
     }
 
     refreshTimePos();
+    LOGI("[mpv-open] done in {:.3f}s — duration={:.3f}s reliable={} pos={:.3f}s", //
+        chrono::duration<double>(chrono::steady_clock::now() - wallOpen0).count(), m_durationSec,
+        m_durationReliable ? 1 : 0, m_positionSec);
     return true;
 }
 
@@ -394,11 +509,11 @@ bool MpvGlPlayer::decodeFrame()
     return true;
 }
 
-void MpvGlPlayer::renderToTexture(GLuint texture)
+void MpvGlPlayer::renderToFbo(GLuint texture, int w, int h)
 {
     auto* mrc = static_cast<mpv_render_context*>(m_mrc);
     auto* mpv = static_cast<mpv_handle*>(m_mpv);
-    if (!mrc || !mpv || texture == 0 || m_width <= 0 || m_height <= 0) {
+    if (!mrc || !mpv || texture == 0 || w <= 0 || h <= 0) {
         return;
     }
 
@@ -417,8 +532,8 @@ void MpvGlPlayer::renderToTexture(GLuint texture)
         return;
     }
 
-    int flipY = 1;
-    mpv_opengl_fbo fbo = {static_cast<int>(m_glFbo), m_width, m_height, static_cast<int>(GL_RGBA8)};
+    mpv_opengl_fbo fbo = {static_cast<int>(m_glFbo), w, h, static_cast<int>(GL_RGBA8)};
+    int flipY = (fbo.fbo == 0) ? 1 : 0;
     mpv_render_param rparams[] = {
         {static_cast<mpv_render_param_type>(MPV_RENDER_PARAM_OPENGL_FBO), &fbo},
         {static_cast<mpv_render_param_type>(MPV_RENDER_PARAM_FLIP_Y), &flipY},
@@ -430,6 +545,11 @@ void MpvGlPlayer::renderToTexture(GLuint texture)
     refreshTimePos();
 
     glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+}
+
+void MpvGlPlayer::renderToTexture(GLuint texture)
+{
+    renderToFbo(texture, m_width, m_height);
 }
 
 bool MpvGlPlayer::lazyProbePresentationDuration()
@@ -490,7 +610,7 @@ bool MpvGlPlayer::createRenderContext()
 
 void MpvGlPlayer::drainEvents(double /*timeoutSec*/) {}
 
-bool MpvGlPlayer::waitFileLoaded()
+bool MpvGlPlayer::waitFileLoaded(GLuint /*scratchRgbTex*/)
 {
     return false;
 }
