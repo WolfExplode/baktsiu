@@ -3645,16 +3645,29 @@ void App::tickAndUploadVideoFrame(float deltaTime)
         }
 
         constexpr double kEndEps = 1.0 / 240.0;
+        const double dL = videoScrubSpanSec(mVideoReader.get());
+        const double dR = videoScrubSpanSec(mVideoReaderB.get());
+        constexpr double kNeedMediaStepEps = 1e-9;
         if (n > 0) {
-            // Step both streams in lockstep; advance composition time only for successful pairs (decodeFrame
-            // returns false at eof-reached — same as single-video playback).
+            // Advance composition time in lockstep; frame-step a side only when its clamped media time would
+            // move (see mediaTimeFromComposition). Otherwise decodeFrame hits eof-reached on the short clip
+            // and wrongly stopped playback while the longer clip still has frames.
             for (int i = 0; i < n; ++i) {
-                if (!mVideoReader->decodeFrame(true)) {
+                const double T = mVideoCompositionT;
+                const double Tnext = T + step;
+                const double tLNow = mediaTimeFromComposition(T, mVideoStartL, dL);
+                const double tRNow = mediaTimeFromComposition(T, mVideoStartR, dR);
+                const double tLNext = mediaTimeFromComposition(Tnext, mVideoStartL, dL);
+                const double tRNext = mediaTimeFromComposition(Tnext, mVideoStartR, dR);
+                const bool needL = tLNext > tLNow + kNeedMediaStepEps;
+                const bool needR = tRNext > tRNow + kNeedMediaStepEps;
+                if (needL && !mVideoReader->decodeFrame(true)) {
                     mVideoComparePlaybackBank = 0.0;
                     mVideoPlaying = false;
                     break;
                 }
-                if (!mVideoReaderB || !mVideoReaderB->isOpen() || !mVideoReaderB->decodeFrame(true)) {
+                if (needR
+                    && (!mVideoReaderB || !mVideoReaderB->isOpen() || !mVideoReaderB->decodeFrame(true))) {
                     mVideoComparePlaybackBank = 0.0;
                     mVideoPlaying = false;
                     break;
