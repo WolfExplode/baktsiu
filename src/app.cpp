@@ -4837,11 +4837,7 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             ImGui::TextDisabled("(duration unknown)");
         }
 
-        static char sOffBufL[64] = "";
-        static char sOffBufR[64] = "";
-
-        auto offsetControl = [&](const char* label, double& v, double stepSec, const ImVec4& tint, char* buf,
-                                 size_t bufSize) -> bool {
+        auto offsetControl = [&](const char* label, double& v, double stepSec, const ImVec4& tint) -> bool {
             bool changed = false;
             ImGui::PushID(label);
             ImGui::AlignTextToFramePadding();
@@ -4860,21 +4856,6 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frame);
             ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frame);
 
-            auto stripUnitsInPlace = [](char* s) {
-                if (!s) {
-                    return;
-                }
-                // Truncate at first non-number-ish char (keeps sign, decimal, exponent).
-                for (char* p = s; *p; ++p) {
-                    const char c = *p;
-                    const bool ok = (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
-                    if (!ok) {
-                        *p = '\0';
-                        break;
-                    }
-                }
-            };
-
             if (ImGui::SmallButton("<")) {
                 v -= stepSec;
                 changed = true;
@@ -4882,45 +4863,22 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             ImGui::SameLine();
             ImGui::SetNextItemWidth(92.0f);
             {
-                const ImGuiID vId = ImGui::GetID("##v");
-                const bool wasActive = (ImGui::GetActiveID() == vId);
-                if (!wasActive) {
-                    std::snprintf(buf, bufSize, "%.3f", v);
+                // DragScalar gives us both scrub-style dragging and ctrl-click text entry.
+                const float dragSpeed = static_cast<float>(stepSec * (ImGui::GetIO().KeyShift ? 0.75 : 4.0));
+                changed |= ImGui::DragScalar("##v", ImGuiDataType_Double, &v, dragSpeed, nullptr, nullptr, "%.3f", 1.0f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Drag to scrub, Ctrl+Click to type");
                 }
 
-                ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
-                const bool enter = ImGui::InputText("##v", buf, bufSize, flags);
-                const bool nowActive = ImGui::IsItemActive();
-                const bool activated = ImGui::IsItemActivated();
-                const bool deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
-
-                if (activated) {
-                    stripUnitsInPlace(buf);
-                }
-
-                if (enter || deactivatedAfterEdit) {
-                    char* endp = nullptr;
-                    const double parsed = std::strtod(buf, &endp);
-                    if (endp != buf) {
-                        v = parsed;
-                        changed = true;
-                    }
-                }
-
-                if (!nowActive) {
-                    std::snprintf(buf, bufSize, "%.3f", v);
-
-                    // Visual-only unit suffix, not part of the input buffer.
-                    const ImVec2 rmin = ImGui::GetItemRectMin();
-                    const ImVec2 rmax = ImGui::GetItemRectMax();
-                    const char* unit = "s";
-                    const ImVec2 unitSz = ImGui::CalcTextSize(unit);
-                    const float padX = 6.0f;
-                    const float x = rmax.x - unitSz.x - padX;
-                    const float y = rmin.y + (rmax.y - rmin.y - unitSz.y) * 0.5f;
-                    const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-                    ImGui::GetWindowDrawList()->AddText(ImVec2(x, y), col, unit);
-                }
+                const ImVec2 rmin = ImGui::GetItemRectMin();
+                const ImVec2 rmax = ImGui::GetItemRectMax();
+                const char* unit = "s";
+                const ImVec2 unitSz = ImGui::CalcTextSize(unit);
+                const float padX = 6.0f;
+                const float x = rmax.x - unitSz.x - padX;
+                const float y = rmin.y + (rmax.y - rmin.y - unitSz.y) * 0.5f;
+                const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::GetWindowDrawList()->AddText(ImVec2(x, y), col, unit);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton(">")) {
@@ -4942,9 +4900,9 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const double stepLeft = dispSwap ? stepB : stepA;
         const double stepRight = dispSwap ? stepA : stepB;
 
-        const bool changedL = offsetControl("L", startLeft, stepLeft, tintL, sOffBufL, sizeof sOffBufL);
+        const bool changedL = offsetControl("L", startLeft, stepLeft, tintL);
         ImGui::SameLine();
-        const bool changedR = offsetControl("R", startRight, stepRight, tintR, sOffBufR, sizeof sOffBufR);
+        const bool changedR = offsetControl("R", startRight, stepRight, tintR);
         if (changedL || changedR) {
             clampVideoCompositionT();
             syncVideoDecodersToCompositionT();
