@@ -16,23 +16,15 @@
 #include <spdlog/spdlog.h>
 #pragma warning(pop)
 
-#if defined(_WIN32) && defined(USE_VIDEO)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
-
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <thread>
 
 #include <fx/gltf.h>
 #include <stb_image.h>
@@ -270,6 +262,8 @@ void PlotMultiHistograms(
 namespace
 {
 
+const char* const kInfoPopupName = "Info";
+
 void formatVideoHms(double secIn, char* out, size_t outSize)
 {
     if (outSize == 0) {
@@ -364,11 +358,6 @@ void App::initLogger()
 bool App::initialize(const char* title, int width, int height)
 {
     initLogger();
-
-#if defined(_WIN32) && defined(USE_VIDEO)
-    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    mVideoComInitialized = (hrCom == S_OK);
-#endif
 
     glfwSetErrorCallback([](int error, const char* description) {
         LOGW("GLFW error {}: {}", error, description);
@@ -585,13 +574,6 @@ void App::release()
 
     glfwDestroyWindow(mWindow);
     glfwTerminate();
-
-#if defined(_WIN32) && defined(USE_VIDEO)
-    if (mVideoComInitialized) {
-        CoUninitialize();
-        mVideoComInitialized = false;
-    }
-#endif
 }
 
 // This is executed in main thread (which has GL context).
@@ -710,19 +692,8 @@ void App::run(CompositeFlags initFlags)
         }
 #if defined(USE_VIDEO)
         else {
-            bool videoReaderDidRewind = false;
             if (mVideoLazyDurationGraceFrames > 0) {
                 --mVideoLazyDurationGraceFrames;
-            } else {
-                if (mVideoReader) {
-                    videoReaderDidRewind |= mVideoReader->lazyProbePresentationDuration();
-                }
-                if (videoCompareActive() && mVideoReaderB) {
-                    videoReaderDidRewind |= mVideoReaderB->lazyProbePresentationDuration();
-                }
-                if (videoReaderDidRewind) {
-                    syncVideoDecodersToCompositionT();
-                }
             }
             tickAndUploadVideoFrame(io.DeltaTime);
             initVideoTransportBar(io);
@@ -920,6 +891,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
         if (mVideoMode && mVideoReader && mVideoReader->isOpen() && !io.WantTextInput) {
             mVideoPlaying ^= true;
             mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
         }
 #endif
     } else if (ImGui::IsKeyPressed(0x51)) { // q
@@ -927,7 +899,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
     } else if (ImGui::IsKeyPressed(0x57)) { // w
         mShowPixelMarker ^= true;
     } else if (ImGui::IsKeyPressed(0x122)) { // F1
-        ImGui::OpenPopup("Home");
+        ImGui::OpenPopup(kInfoPopupName);
     } else if (ImGui::IsKeyPressed(0x126)) { // F5
         Image* image = getTopImage();
         if (image) image->reload();
@@ -938,7 +910,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
         // ps. There are few other key pressed cases are handled in updateImageTransform().
     }
 
-    initHomeWindow("Home");
+    initHomeWindow(kInfoPopupName);
 
     if (showRemoveImageDlg(kImageRemoveDlgTitle)) {
         removeTopImage(true);
@@ -1274,22 +1246,21 @@ void    App::initToolbar()
     ImGui::Begin("toolbar", nullptr, ImGuiWindowFlags_NoDecoration);
 
     const Vec2f buttonSize(26.0f);
-    const char* popupWindowName = "Home";
+    const float toolbarTextBtnH = 26.0f;
 
-    if (ImGui::Button(ICON_FA_HOME, buttonSize)) {
-        ImGui::OpenPopup(popupWindowName);
+    if (ImGui::Button(ICON_FA_INFO "##toolbarInfo", ImVec2(0.f, toolbarTextBtnH))) {
+        ImGui::OpenPopup(kInfoPopupName);
     }
-    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Home Window"); }
-
+    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Info"); }
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_IMPORT, buttonSize)) {
+    if (ImGui::Button((std::string(ICON_FA_FILE_IMPORT) + " Import##toolbarImport").c_str(), ImVec2(0.f, toolbarTextBtnH))) {
         showImportImageDlg();
     }
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Import Images"); }
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_EXPORT, buttonSize)) {
+    if (ImGui::Button((std::string(ICON_FA_FILE_EXPORT) + " Export##toolbarExport").c_str(), ImVec2(0.f, toolbarTextBtnH))) {
         showExportSessionDlg();
     }
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Export Session"); }
@@ -1429,7 +1400,7 @@ void    App::initToolbar()
     ImGui::PopStyleColor(1);
     ImGui::PopStyleVar(7);
 
-    initHomeWindow(popupWindowName);
+    initHomeWindow(kInfoPopupName);
     ImGui::End();
 }
 
@@ -1744,15 +1715,17 @@ void App::initImagePropWindow()
     ImGui::PopStyleVar(1);
     ImGui::EndChild();
 
-    const int buttonNum = 4;
     ImGui::PushFont(mSmallIconFont);
-    ImGui::Dummy(Vec2f(propWindowWidth - (buttonSize.x + g.Style.ItemSpacing.x) * buttonNum - handleWidth, buttonSize.y));
+    const std::string importPropLbl = std::string(ICON_FA_FILE_IMPORT) + " Import##propImport";
+    const float importPropBtnW = ImGui::CalcTextSize(importPropLbl.c_str()).x + g.Style.FramePadding.x * 2.f;
+    const float propRowBtnsW = importPropBtnW + g.Style.ItemSpacing.x + (buttonSize.x + g.Style.ItemSpacing.x) * 3;
+    ImGui::Dummy(Vec2f(propWindowWidth - propRowBtnsW - handleWidth, buttonSize.y));
     ImGui::SameLine();
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
     ImGui::PushStyleColor(ImGuiCol_Button, g.Style.Colors[ImGuiCol_MenuBarBg]);
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_IMPORT "##ImportImage", buttonSize)) {
+    if (ImGui::Button(importPropLbl.c_str(), ImVec2(0.f, buttonSize.y))) {
         showImportImageDlg();
     }
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Import Images"); }
@@ -1820,6 +1793,50 @@ void App::initFooter()
 
     ImGui::Text("%s", mImageScaleInfo);
 
+#if defined(USE_VIDEO)
+    const bool videoFooterDims = mVideoMode && mVideoReader && mVideoReader->isOpen();
+    if (videoFooterDims) {
+        if (videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()) {
+            const bool dispSwap = mVideoSwapPresentationLR;
+            const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+            const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+            const Vec2f leftSz(leftP->displayWidthForAspect(), leftP->displayHeightForAspect());
+            const Vec2f rightSz(rightP->displayWidthForAspect(), rightP->displayHeightForAspect());
+
+            ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
+            ImGui::Text("L | %.0f x %.0f", leftSz.x, leftSz.y);
+            Vec2f lcoords;
+            if (getCompareSideVideoPixelAtMouse(g.IO, 0, lcoords)) {
+                ImGui::SameLine();
+                ImGui::Text("(%.0f, %.0f)", lcoords.x, leftSz.y - lcoords.y - 1.0f);
+            }
+
+            char rbuf[128];
+            Vec2f rcoords;
+            if (getCompareSideVideoPixelAtMouse(g.IO, 1, rcoords)) {
+                sprintf_s(rbuf, "R | %.0f x %.0f (%.0f, %.0f)", rightSz.x, rightSz.y, rcoords.x,
+                    rightSz.y - rcoords.y - 1.0f);
+            } else {
+                sprintf_s(rbuf, "R | %.0f x %.0f", rightSz.x, rightSz.y);
+            }
+            const float rtextW = ImGui::CalcTextSize(rbuf).x;
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - rtextW);
+            ImGui::TextUnformatted(rbuf);
+        } else {
+            const Vec2f imageSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
+            ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
+            ImGui::Text("| %.0f x %.0f", imageSize.x, imageSize.y);
+            Vec2f imageCoords;
+            if (getSingleVideoPixelAtMouse(g.IO, imageCoords)) {
+                ImGui::SameLine();
+                imageCoords.y = imageSize.y - imageCoords.y - 1;
+                ImGui::Text("(%.0f, %.0f)", imageCoords.x, imageCoords.y);
+            }
+        }
+    } else
+#endif
+    {
     const bool compareUi = inCompareMode() && mTopImageIndex >= 0 && mCmpImageIndex >= 0;
 
     if (compareUi) {
@@ -1867,6 +1884,7 @@ void App::initFooter()
         ImGui::TextUnformatted(filename.c_str());
     }
 
+    }
     ImGui::End();
     ImGui::PopFont();
 }
@@ -1947,16 +1965,17 @@ void    App::showImageProperties()
 
 void    App::initHomeWindow(const char* name)
 {
-    bool open = true;
-    
     ImGui::SetNextWindowContentWidth(500.0f);
-    if (ImGui::BeginPopupModal(name, &open, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+    if (ImGui::BeginPopupModal(name, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape))) {
+            ImGui::CloseCurrentPopup();
+        }
         //ImGui::Dummy(Vec2f(550.0f, ImGui::GetFrameHeight()));
         if (ImGui::BeginTabBar("ControlsBar", ImGuiTabBarFlags_None)) {
             if (ImGui::BeginTabItem("Controls")) {
                 ImGui::Columns(2, nullptr, false);
 
-                ImGui::Text("Show Home Panel");
+                ImGui::Text("Show Info Panel");
                 ImGui::Text("Toggle Property Window");
                 ImGui::Text("Toggle Split View");
                 ImGui::Text("Toggle Side-by-Side Column View");
@@ -2306,7 +2325,7 @@ void    App::showImportImageDlg()
     std::vector<std::string> videoPaths;
     std::vector<std::string> imagePaths;
     for (const std::string& path : selection) {
-        if (MFVideoReader::isSupportedExtension(path)) {
+        if (MpvGlPlayer::isSupportedExtension(path)) {
             videoPaths.push_back(path);
         } else {
             imagePaths.push_back(path);
@@ -2628,7 +2647,7 @@ void    App::onFileDrop(int count, const char* filepaths[])
 
         if (endsWith(filepath, ".bts")) {
             openSession(filepath);
-        } else if (MFVideoReader::isSupportedExtension(filepath)) {
+        } else if (MpvGlPlayer::isSupportedExtension(filepath)) {
             videoPaths.push_back(filepath);
         } else {
             filepathArray.push_back(filepath);
@@ -2690,6 +2709,37 @@ void    App::saveSession(const std::string& filepath)
 
 namespace
 {
+constexpr double kVideoScrubUnknownMaxSec = 3600.0 * 24.0;  // 24h upper composition bound when duration unknown
+// Small forward frame steps: prefer keyframe-style seek below this delta (see seek(..., false)).
+constexpr double kVideoForwardKeyframeSeekMaxSec = 1.35;
+// Cap real-time delta fed into playback clocks so a blocking open / hitch does not schedule many decodes in one UI frame.
+constexpr double kVideoPlaybackWallDtCapSec = 0.25;
+constexpr int kVideoMaxCompareStepsPerTick = 8;
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+inline bool videoPipelineDbgEnabled(bool userFlag)
+{
+    return userFlag;
+}
+#else
+inline bool videoPipelineDbgEnabled(bool)
+{
+    return false;
+}
+#endif
+
+double videoScrubSpanSec(const MpvGlPlayer* r)
+{
+    if (!r || !r->isOpen()) {
+        return 0.0;
+    }
+    const double d = r->durationSec();
+    if (r->hasReliableDuration() && d > 0.001) {
+        return d;
+    }
+    return kVideoScrubUnknownMaxSec;
+}
+
 double mediaTimeFromComposition(double T, double startS, double durationSec)
 {
     double t = T - startS;
@@ -2704,6 +2754,59 @@ double mediaTimeFromComposition(double T, double startS, double durationSec)
     }
     return t;
 }
+
+// Skip redundant seek/decode when scrubbing if target media time barely changed (compare mode: one
+// stream often stays clamped while the other moves).
+double mediaSyncEpsilonSec(const MpvGlPlayer* r)
+{
+    if (!r || !r->isOpen()) {
+        return 1e-4;
+    }
+    double fd = r->frameDurationSec();
+    if (fd < 1e-6 || fd > 1.0) {
+        fd = 1.0 / 30.0;
+    }
+    return (std::max)(1e-4, fd * 0.25);
+}
+
+double saneFrameDurSec(const MpvGlPlayer* r)
+{
+    double fd = (r && r->isOpen()) ? r->frameDurationSec() : 0.0;
+    if (fd < 1e-6 || fd > 1.0) {
+        fd = 1.0 / 30.0;
+    }
+    return fd;
+}
+
+struct VideoScrubDecodeHint {
+    bool run = false;
+    // 0 = exact seek + full render; >0 = keyframe-style seek (scrub preview only).
+    int maxReadCapPerStream = 0;
+};
+
+// While dragging: throttle + use keyframe seeks between previews; on grab, release, or click: exact seek.
+VideoScrubDecodeHint videoScrubDecodeHint(bool itemActive, bool itemActivated, bool itemClicked, bool valueChanged,
+    bool itemDeactivated, double imguiTimeSec, double& lastDecodeTimeSec)
+{
+    VideoScrubDecodeHint out;
+    constexpr double kMinIntervalSec = 1.0 / 20.0;
+    constexpr int kPreviewReadCap = 96;
+    if (itemDeactivated || itemActivated || itemClicked) {
+        lastDecodeTimeSec = imguiTimeSec;
+        out.run = true;
+        out.maxReadCapPerStream = 0;
+        return out;
+    }
+    if (itemActive && valueChanged) {
+        if (imguiTimeSec - lastDecodeTimeSec >= kMinIntervalSec) {
+            lastDecodeTimeSec = imguiTimeSec;
+            out.run = true;
+            out.maxReadCapPerStream = kPreviewReadCap;
+            return out;
+        }
+    }
+    return out;
+}
 }  // namespace
 
 bool App::videoCompareActive() const
@@ -2715,6 +2818,104 @@ bool App::videoCompareActive() const
 #endif
 }
 
+#if defined(USE_VIDEO)
+namespace
+{
+// Compare: scrub row + L/R offsets (no extra header row). Must match initVideoTransportBar / blit viewport.
+constexpr float kVideoTransportBarHeightCompare = 60.0f;
+constexpr float kVideoTransportBarHeightSingle = 36.0f;
+
+bool videoContainPixelFromLocal(Vec2f localBL, Vec2f panelPx, Vec2f vidSize, Vec2f& outPx)
+{
+    const float vw = (std::max)(vidSize.x, 1.f);
+    const float vh = (std::max)(vidSize.y, 1.f);
+    const float pw = (std::max)(panelPx.x, 1.f);
+    const float ph = (std::max)(panelPx.y, 1.f);
+    const float s = (std::min)(pw / vw, ph / vh);
+    const Vec2f disp(vw * s / pw, vh * s / ph);
+    const Vec2f off((1.f - disp.x) * 0.5f, (1.f - disp.y) * 0.5f);
+    const Vec2f vidUv((localBL.x - off.x) / (std::max)(disp.x, 1e-5f),
+        (localBL.y - off.y) / (std::max)(disp.y, 1e-5f));
+    if (vidUv.x < -1e-4f || vidUv.x > 1.f + 1e-4f || vidUv.y < -1e-4f || vidUv.y > 1.f + 1e-4f) {
+        return false;
+    }
+    outPx.x = std::floor(vidUv.x * vw);
+    outPx.y = std::floor(vidUv.y * vh);
+    outPx.x = glm::clamp(outPx.x, 0.f, (std::max)(vw - 1.f, 0.f));
+    outPx.y = glm::clamp(outPx.y, 0.f, (std::max)(vh - 1.f, 0.f));
+    return true;
+}
+}  // namespace
+
+void App::getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const
+{
+    const bool cmp = videoCompareActive();
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float transportBarH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
+    const float contentH = io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
+    outContentOrigin = Vec2f(0.0f, mToolbarHeight);
+    outContentSize = Vec2f(io.DisplaySize.x, (std::max)(1.0f, contentH));
+}
+
+bool App::getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const
+{
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return false;
+    }
+    Vec2f origin, size;
+    getVideoBlitContentLayout(io, origin, size);
+    const Vec2f sp(io.MousePos.x, io.MousePos.y);
+    if (sp.x < origin.x || sp.y < origin.y || sp.x >= origin.x + size.x || sp.y >= origin.y + size.y) {
+        return false;
+    }
+    Vec2f local((sp.x - origin.x) / (std::max)(size.x, 1.f), (sp.y - origin.y) / (std::max)(size.y, 1.f));
+    local.y = 1.0f - local.y;
+    const Vec2f vidSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
+    return videoContainPixelFromLocal(local, size, vidSize, outImagePx);
+}
+
+bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const
+{
+    if (!videoCompareActive() || !mVideoReader || !mVideoReader->isOpen() || !mVideoReaderB || !mVideoReaderB->isOpen()) {
+        return false;
+    }
+    if (side != 0 && side != 1) {
+        return false;
+    }
+    Vec2f origin, size;
+    getVideoBlitContentLayout(io, origin, size);
+    const Vec2f sp(io.MousePos.x, io.MousePos.y);
+    if (sp.x < origin.x || sp.y < origin.y || sp.x >= origin.x + size.x || sp.y >= origin.y + size.y) {
+        return false;
+    }
+    Vec2f local((sp.x - origin.x) / (std::max)(size.x, 1.f), (sp.y - origin.y) / (std::max)(size.y, 1.f));
+    local.y = 1.0f - local.y;
+
+    const float spx = glm::clamp(mViewSplitPos, 0.02f, 0.98f);
+    if (side == 0 && local.x >= spx) {
+        return false;
+    }
+    if (side == 1 && local.x < spx) {
+        return false;
+    }
+
+    const bool dispSwap = mVideoSwapPresentationLR;
+    const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+    const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+    const MpvGlPlayer* sideP = (side == 0) ? leftP : rightP;
+    if (!sideP || !sideP->isOpen()) {
+        return false;
+    }
+    const Vec2f vidSize(sideP->displayWidthForAspect(), sideP->displayHeightForAspect());
+    return videoContainPixelFromLocal(local, size, vidSize, outImagePx);
+}
+#endif  // USE_VIDEO
+
 void App::recomputeVideoScrubBounds(double& outMin, double& outMax) const
 {
 #if !defined(USE_VIDEO)
@@ -2722,20 +2923,16 @@ void App::recomputeVideoScrubBounds(double& outMin, double& outMax) const
     outMax = 1.0;
 #else
     if (videoCompareActive() && mVideoReader && mVideoReader->isOpen()) {
-        const double dL = std::max(0.0, mVideoReader->durationSec());
-        const double dR = std::max(0.0, mVideoReaderB->durationSec());
+        const double spanL = videoScrubSpanSec(mVideoReader.get());
+        const double spanR = videoScrubSpanSec(mVideoReaderB.get());
         outMin = (std::min)(mVideoStartL, mVideoStartR);
-        outMax = (std::max)(mVideoStartL + dL, mVideoStartR + dR);
+        outMax = (std::max)(mVideoStartL + spanL, mVideoStartR + spanR);
         if (outMax < outMin + 1e-3) {
             outMax = outMin + 1.0;
         }
     } else if (mVideoReader && mVideoReader->isOpen()) {
         outMin = 0.0;
-        double metaDur = mVideoReader->durationSec();
-        if (metaDur <= 0.001) {
-            metaDur = 60.0;
-        }
-        outMax = metaDur;
+        outMax = videoScrubSpanSec(mVideoReader.get());
     } else {
         outMin = 0.0;
         outMax = 1.0;
@@ -2758,27 +2955,111 @@ void App::clampVideoCompositionT()
 #endif
 }
 
-void App::syncVideoDecodersToCompositionT()
+void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
 {
 #if !defined(USE_VIDEO)
+    (void)maxDecodeReadCapPerStream;
     return;
 #else
+#if defined(BAKTSIU_DEBUG_BUILD)
+    namespace chrono = std::chrono;
+    const auto tSync0 = chrono::steady_clock::now();
+#endif
     if (!mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
-    const double dL = mVideoReader->durationSec();
-    const double tL = mediaTimeFromComposition(mVideoCompositionT, mVideoStartL, dL);
-    mVideoReader->seek(tL);
-    mVideoReader->decodeFrameThrough(tL);
-    uploadVideoTexture();
-    if (videoCompareActive()) {
-        const double dR = mVideoReaderB->durationSec();
-        const double tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
-        mVideoReaderB->seek(tR);
-        mVideoReaderB->decodeFrameThrough(tR);
-        uploadVideoTextureB();
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+        mVideoDbgLastUploadLMs = 0.f;
+        mVideoDbgLastUploadRMs = 0.f;
     }
+    bool ranDecodeL = false;
+    bool ranDecodeR = false;
+    const double dL = videoScrubSpanSec(mVideoReader.get());
+    const double tL = mediaTimeFromComposition(mVideoCompositionT, mVideoStartL, dL);
+    double tR = 0.0;
+    bool hasR = false;
+    const double epsL = mediaSyncEpsilonSec(mVideoReader.get());
+    const bool needL = (mVideoLastSyncedTargetMediaL < 0.0)
+        || (std::fabs(tL - mVideoLastSyncedTargetMediaL) > epsL);
+    if (needL) {
+        mVideoReader->seek(tL, maxDecodeReadCapPerStream <= 0);
+        mVideoReader->decodeFrameThrough(tL, maxDecodeReadCapPerStream);
+        uploadVideoTexture();
+        ranDecodeL = true;
+        // Preview decodes use a read cap and may not reach target; keep cache for skip-optimization
+        // aligned with full-quality sync only.
+        if (maxDecodeReadCapPerStream <= 0) {
+            mVideoLastSyncedTargetMediaL = tL;
+        }
+    }
+    if (videoCompareActive()) {
+        const double dR = videoScrubSpanSec(mVideoReaderB.get());
+        tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
+        hasR = true;
+        const double epsR = mediaSyncEpsilonSec(mVideoReaderB.get());
+        const bool needR = (mVideoLastSyncedTargetMediaR < 0.0)
+            || (std::fabs(tR - mVideoLastSyncedTargetMediaR) > epsR);
+        if (needR) {
+            mVideoReaderB->seek(tR, maxDecodeReadCapPerStream <= 0);
+            mVideoReaderB->decodeFrameThrough(tR, maxDecodeReadCapPerStream);
+            uploadVideoTextureB();
+            ranDecodeR = true;
+            if (maxDecodeReadCapPerStream <= 0) {
+                mVideoLastSyncedTargetMediaR = tR;
+            }
+        }
+    } else {
+        mVideoLastSyncedTargetMediaR = -1.0;
+    }
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming) && (ranDecodeL || ranDecodeR)) {
+        if (ranDecodeL) {
+            LOGI(
+                "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+                "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+                maxDecodeReadCapPerStream, static_cast<double>(mVideoReader->lastSeekMs()),
+                static_cast<double>(mVideoReader->lastSeekFlushMs()),
+                static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+                static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+                mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+                static_cast<double>(mVideoDbgLastUploadLMs), 0);
+        }
+        if (ranDecodeR && mVideoReaderB && mVideoReaderB->isOpen()) {
+            LOGI(
+                "[video-pipe] readCap={} R: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+                "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+                maxDecodeReadCapPerStream, static_cast<double>(mVideoReaderB->lastSeekMs()),
+                static_cast<double>(mVideoReaderB->lastSeekFlushMs()),
+                static_cast<double>(mVideoReaderB->lastSeekSetPosMs()),
+                static_cast<double>(mVideoReaderB->lastDecodeThroughMs()),
+                mVideoReaderB->lastDecodeThroughReads(), mVideoReaderB->lastDecodeThroughHitCap() ? 1 : 0,
+                static_cast<double>(mVideoDbgLastUploadRMs), 0);
+        }
+    }
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+    // Post-sync debug: how far mpv's reported time-pos is from our target (ms).
+    {
+        const double posL = (mVideoReader && mVideoReader->isOpen()) ? mVideoReader->positionSec() : 0.0;
+        mVideoDbgLastDriftLMs = static_cast<float>((posL - tL) * 1000.0);
+        if (hasR && mVideoReaderB && mVideoReaderB->isOpen()) {
+            const double posR = mVideoReaderB->positionSec();
+            mVideoDbgLastDriftRMs = static_cast<float>((posR - tR) * 1000.0);
+        } else {
+            mVideoDbgLastDriftRMs = 0.f;
+        }
+    }
+    mVideoDbgLastSyncMs =
+        chrono::duration<float, std::milli>(chrono::steady_clock::now() - tSync0).count();
 #endif
+#endif
+}
+
+void App::resetVideoDecoderSyncCache()
+{
+    mVideoLastSyncedTargetMediaL = -1.0;
+    mVideoLastSyncedTargetMediaR = -1.0;
+    mVideoLastScrubDecodeTime = -1.0e9;
+    mVideoComparePlaybackBank = 0.0;
 }
 
 void App::stepVideoScrubFiveSeconds(int direction)
@@ -2793,6 +3074,7 @@ void App::stepVideoScrubFiveSeconds(int direction)
     constexpr double kJumpSec = 5.0;
     mVideoPlaying = false;
     mVideoPlaybackTimeBank = 0.0;
+    mVideoComparePlaybackBank = 0.0;
     if (videoCompareActive()) {
         mVideoCompositionT += static_cast<double>(direction) * kJumpSec;
         clampVideoCompositionT();
@@ -2801,15 +3083,13 @@ void App::stepVideoScrubFiveSeconds(int direction)
         return;
     }
     const double pos = mVideoReader->positionSec();
-    double metaDur = mVideoReader->durationSec();
+    const double metaDur = mVideoReader->durationSec();
     double frameDur = mVideoReader->frameDurationSec();
     if (frameDur < 1e-6 || frameDur > 1.0) {
         frameDur = 1.0 / 30.0;
     }
-    double tMax = metaDur;
-    if (tMax <= 0.001) {
-        tMax = std::max(60.0, pos + kJumpSec);
-    } else {
+    double tMax = videoScrubSpanSec(mVideoReader.get());
+    if (mVideoReader->hasReliableDuration() && metaDur > 0.001) {
         const double endSlack = std::max(frameDur * 3.0, 0.1);
         tMax = std::max(0.0, metaDur - endSlack);
     }
@@ -2819,9 +3099,23 @@ void App::stepVideoScrubFiveSeconds(int direction)
     } else if (newPos > tMax) {
         newPos = tMax;
     }
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+        mVideoDbgLastUploadLMs = 0.f;
+    }
     mVideoReader->seek(newPos);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+        LOGI(
+            "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+            "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+            0, static_cast<double>(mVideoReader->lastSeekMs()),
+            static_cast<double>(mVideoReader->lastSeekFlushMs()),
+            static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+            static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+            mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+            static_cast<double>(mVideoDbgLastUploadLMs), 0);
+    }
     mVideoScrubValue = mVideoReader->positionSec();
 #endif
 }
@@ -2837,6 +3131,7 @@ void App::stepVideoScrubOneFrame(int direction)
     }
     mVideoPlaying = false;
     mVideoPlaybackTimeBank = 0.0;
+    mVideoComparePlaybackBank = 0.0;
     if (videoCompareActive()) {
         double stepA = mVideoReader->frameDurationSec();
         double stepB =
@@ -2859,11 +3154,9 @@ void App::stepVideoScrubOneFrame(int direction)
         step = 1.0 / 30.0;
     }
     const double pos = mVideoReader->positionSec();
-    double metaDur = mVideoReader->durationSec();
-    double tMax = metaDur;
-    if (tMax <= 0.001) {
-        tMax = std::max(60.0, pos + 5.0);
-    } else {
+    const double metaDur = mVideoReader->durationSec();
+    double tMax = videoScrubSpanSec(mVideoReader.get());
+    if (mVideoReader->hasReliableDuration() && metaDur > 0.001) {
         const double endSlack = std::max(step * 3.0, 0.1);
         tMax = std::max(0.0, metaDur - endSlack);
     }
@@ -2873,9 +3166,27 @@ void App::stepVideoScrubOneFrame(int direction)
     } else if (newPos > tMax) {
         newPos = tMax;
     }
-    mVideoReader->seek(newPos);
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+        mVideoDbgLastUploadLMs = 0.f;
+    }
+    // Small forward steps: seek(..., false) uses keyframe-style seek in mpv; large/backward use exact seek.
+    const double deltaSec = newPos - pos;
+    const bool forwardCatchup =
+        direction > 0 && deltaSec >= -1e-9 && deltaSec <= kVideoForwardKeyframeSeekMaxSec;
+    mVideoReader->seek(newPos, !forwardCatchup);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
+    if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+        LOGI(
+            "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+            "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+            0, static_cast<double>(mVideoReader->lastSeekMs()),
+            static_cast<double>(mVideoReader->lastSeekFlushMs()),
+            static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+            static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+            mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+            static_cast<double>(mVideoDbgLastUploadLMs), 0);
+    }
     mVideoScrubValue = mVideoReader->positionSec();
 #endif
 }
@@ -2995,17 +3306,37 @@ void App::openVideosFromSelection()
         }
     }
 
-    auto readerL = std::make_unique<MFVideoReader>();
-    if (!readerL->open(pathL)) {
-        LOGW("Failed to open video \"{}\"", pathL);
-        return;
-    }
-    std::unique_ptr<MFVideoReader> readerR;
     if (idxR >= 0) {
-        readerR = std::make_unique<MFVideoReader>();
-        if (!readerR->open(pathR)) {
+        LOGI("[video-open] selection n={} idxL={} idxR={} (dual/compare) L=\"{}\" R=\"{}\"", n, idxL, idxR, pathL, pathR);
+    } else {
+        LOGI("[video-open] selection n={} idxL={} idxR=-1 (single) L=\"{}\"", n, idxL, pathL);
+    }
+
+    auto readerL = std::make_unique<MpvGlPlayer>();
+    std::unique_ptr<MpvGlPlayer> readerR;
+    bool openedL = false;
+    bool openedR = false;
+
+    if (idxR >= 0) {
+        readerR = std::make_unique<MpvGlPlayer>();
+        openedL = readerL->open(mWindow, pathL);
+        openedR = readerR->open(mWindow, pathR);
+        if (!openedL) {
+            LOGW("Failed to open video \"{}\"", pathL);
+            if (openedR) {
+                readerR->close();
+            }
+            return;
+        }
+        if (!openedR) {
             LOGW("Failed to open video \"{}\"", pathR);
             readerL->close();
+            return;
+        }
+    } else {
+        openedL = readerL->open(mWindow, pathL);
+        if (!openedL) {
+            LOGW("Failed to open video \"{}\"", pathL);
             return;
         }
     }
@@ -3033,6 +3364,12 @@ void App::openVideosFromSelection()
 
     mVideoReader = std::move(readerL);
     mVideoReaderB = std::move(readerR);
+    if (mVideoReader) {
+        mVideoReader->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
+    }
+    if (mVideoReaderB) {
+        mVideoReaderB->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
+    }
     mVideoMode = true;
     mVideoPlaying = true;
     mVideoPlaybackTimeBank = 0.0;
@@ -3051,9 +3388,16 @@ void App::openVideosFromSelection()
     mVideoCompositionT = tMin;
     mVideoScrubValue = mVideoCompositionT;
 
-    recreateVideoTexture();
-    recreateVideoTextureB();
-    syncVideoDecodersToCompositionT();
+    {
+        namespace chrono = std::chrono;
+        const auto tTexSync0 = chrono::steady_clock::now();
+        recreateVideoTexture();
+        recreateVideoTextureB();
+        resetVideoDecoderSyncCache();
+        syncVideoDecodersToCompositionT();
+        LOGI("[video-open] recreate textures + first syncVideoDecodersToCompositionT: {:.3f}s", //
+            chrono::duration<double>(chrono::steady_clock::now() - tTexSync0).count());
+    }
 
     mVideoLazyDurationGraceFrames = 0;
     if (mVideoReader && mVideoReader->isOpen() && mVideoReader->durationSec() <= 0.001) {
@@ -3100,7 +3444,7 @@ void App::openVideoCompare(const std::string& leftPath, const std::string& right
     if (idxL == idxR) {
         // Same list entry (duplicate path or identical paths after normalization). Opening compare
         // with one file used to bail out entirely and leave video mode empty — that looked like a
-        // failed import and could strand the app if MF paths were flaky on retry.
+        // failed import and could strand the app on retry.
         LOGW("Video compare: left and right resolve to the same list row; opening as single view.");
         mVideoIndexL = idxL;
         mVideoIndexR = -1;
@@ -3146,6 +3490,7 @@ void App::exitVideoMode()
     mVideoPlaying = false;
     mVideoLazyDurationGraceFrames = 0;
     mVideoPlaybackTimeBank = 0.0;
+    resetVideoDecoderSyncCache();
     mVideoStartL = mVideoStartR = 0.0;
     mVideoCompositionT = 0.0;
     mVideoSwapPresentationLR = false;
@@ -3193,8 +3538,12 @@ void App::recreateVideoTexture()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     const int w = mVideoReader->width();
     const int h = mVideoReader->height();
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
+    LOGI("OpenGL video texture (L): {}x{} display {:.0f}x{:.0f}", w, h,
+        static_cast<double>(mVideoReader->displayWidthForAspect()),
+        static_cast<double>(mVideoReader->displayHeightForAspect()));
 #endif
 }
 
@@ -3218,8 +3567,12 @@ void App::recreateVideoTextureB()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     const int w = mVideoReaderB->width();
     const int h = mVideoReaderB->height();
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
+    LOGI("OpenGL video texture (R): {}x{} display {:.0f}x{:.0f}", w, h,
+        static_cast<double>(mVideoReaderB->displayWidthForAspect()),
+        static_cast<double>(mVideoReaderB->displayHeightForAspect()));
 #endif
 }
 
@@ -3231,10 +3584,13 @@ void App::uploadVideoTexture()
     if (mVideoTexture == 0 || !mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
-    glBindTexture(GL_TEXTURE_2D, mVideoTexture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mVideoReader->width(), mVideoReader->height(),
-        GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
-    glBindTexture(GL_TEXTURE_2D, 0);
+    namespace chrono = std::chrono;
+    const bool timeUpload = videoPipelineDbgEnabled(mVideoLogPipelineTiming);
+    const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
+    mVideoReader->renderToTexture(mVideoTexture);
+    if (timeUpload) {
+        mVideoDbgLastUploadLMs = chrono::duration<float, std::milli>(chrono::steady_clock::now() - tUpload0).count();
+    }
 #endif
 }
 
@@ -3246,10 +3602,13 @@ void App::uploadVideoTextureB()
     if (mVideoTextureB == 0 || !mVideoReaderB || !mVideoReaderB->isOpen()) {
         return;
     }
-    glBindTexture(GL_TEXTURE_2D, mVideoTextureB);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mVideoReaderB->width(), mVideoReaderB->height(),
-        GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
-    glBindTexture(GL_TEXTURE_2D, 0);
+    namespace chrono = std::chrono;
+    const bool timeUpload = videoPipelineDbgEnabled(mVideoLogPipelineTiming);
+    const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
+    mVideoReaderB->renderToTexture(mVideoTextureB);
+    if (timeUpload) {
+        mVideoDbgLastUploadRMs = chrono::duration<float, std::milli>(chrono::steady_clock::now() - tUpload0).count();
+    }
 #endif
 }
 
@@ -3262,31 +3621,105 @@ void App::tickAndUploadVideoFrame(float deltaTime)
     if (!mVideoPlaying || !mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
+#if defined(BAKTSIU_DEBUG_BUILD)
+    mVideoDbgLastTickDtMs = static_cast<float>(static_cast<double>(deltaTime) * 1000.0);
+#endif
     if (videoCompareActive()) {
         double tMin = 0.0;
         double tMax = 1.0;
         recomputeVideoScrubBounds(tMin, tMax);
-        mVideoCompositionT += static_cast<double>(deltaTime);
+        // Compare playback: do NOT seek every frame. Frame-step both players according to a shared
+        // playback bank (like single-video mode), then render once per tick.
+        const double stepA = saneFrameDurSec(mVideoReader.get());
+        const double stepB = saneFrameDurSec(mVideoReaderB.get());
+        const double step = (std::min)(stepA, stepB);
+
+        const double dt = (std::min)(static_cast<double>(deltaTime), kVideoPlaybackWallDtCapSec);
+        mVideoComparePlaybackBank += dt;
+        int n = static_cast<int>(std::floor((mVideoComparePlaybackBank / step) + 1e-9));
+        if (n > kVideoMaxCompareStepsPerTick) {
+            n = kVideoMaxCompareStepsPerTick;
+        }
+        if (n > 0) {
+            mVideoComparePlaybackBank -= static_cast<double>(n) * step;
+        }
+
         constexpr double kEndEps = 1.0 / 240.0;
+        if (n > 0) {
+            // Step both streams in lockstep; advance composition time only for successful pairs (decodeFrame
+            // returns false at eof-reached — same as single-video playback).
+            for (int i = 0; i < n; ++i) {
+                if (!mVideoReader->decodeFrame(true)) {
+                    mVideoComparePlaybackBank = 0.0;
+                    mVideoPlaying = false;
+                    break;
+                }
+                if (!mVideoReaderB || !mVideoReaderB->isOpen() || !mVideoReaderB->decodeFrame(true)) {
+                    mVideoComparePlaybackBank = 0.0;
+                    mVideoPlaying = false;
+                    break;
+                }
+                mVideoCompositionT += step;
+                if (mVideoCompositionT >= tMax - kEndEps) {
+                    mVideoCompositionT = tMax;
+                    mVideoComparePlaybackBank = 0.0;
+                    mVideoPlaying = false;
+                    break;
+                }
+            }
+            uploadVideoTexture();
+            uploadVideoTextureB();
+        }
+        clampVideoCompositionT();
         if (mVideoCompositionT >= tMax - kEndEps) {
             mVideoCompositionT = tMax;
             mVideoPlaying = false;
+            mVideoComparePlaybackBank = 0.0;
         }
-        clampVideoCompositionT();
-        syncVideoDecodersToCompositionT();
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+        // Console-friendly summary (copy/paste) for diagnosing compare playback lag.
+        if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+            const double now = ImGui::GetTime();
+            if (now - mVideoDbgLastConsoleBeatSec >= 1.0) {
+                mVideoDbgLastConsoleBeatSec = now;
+                const double posL = (mVideoReader && mVideoReader->isOpen()) ? mVideoReader->positionSec() : 0.0;
+                const double posR =
+                    (mVideoReaderB && mVideoReaderB->isOpen()) ? mVideoReaderB->positionSec() : 0.0;
+                LOGI("[video-compare] dt={:.1f}ms sync={:.1f}ms driftL={:+.1f}ms driftR={:+.1f}ms "
+                     "T={:.3f}s posL={:.3f}s posR={:.3f}s readCap={}",
+                    static_cast<double>(mVideoDbgLastTickDtMs),
+                    static_cast<double>(mVideoDbgLastSyncMs),
+                    static_cast<double>(mVideoDbgLastDriftLMs),
+                    static_cast<double>(mVideoDbgLastDriftRMs),
+                    mVideoCompositionT, posL, posR, n);
+            }
+        }
+#endif
         return;
     }
     double frameDur = mVideoReader->frameDurationSec();
     if (frameDur < 1e-6 || frameDur > 1.0) {
         frameDur = 1.0 / 30.0;
     }
-    mVideoPlaybackTimeBank += static_cast<double>(deltaTime);
-    while (mVideoPlaybackTimeBank >= frameDur) {
-        mVideoPlaybackTimeBank -= frameDur;
-        if (!mVideoReader->decodeFrame()) {
-            mVideoPlaybackTimeBank = 0.0;
-            mVideoPlaying = false;
-            break;
+    const double dt = (std::min)(static_cast<double>(deltaTime), kVideoPlaybackWallDtCapSec);
+    mVideoPlaybackTimeBank += dt;
+    // Never cap the bank: capping drops real elapsed time and playback lags wall clock (cannot catch up).
+    // How many whole video frames the accumulated bank can pay for (fixes FP remainder vs while-loop).
+    constexpr int kMaxDecodeStepsPerFrame = 64;
+    const double framesOwed = mVideoPlaybackTimeBank / frameDur;
+    int n = static_cast<int>(std::floor(framesOwed + 1e-9));
+    if (n > kMaxDecodeStepsPerFrame) {
+        n = kMaxDecodeStepsPerFrame;
+    }
+    if (n > 0) {
+        mVideoPlaybackTimeBank -= static_cast<double>(n) * frameDur;
+        for (int i = 0; i < n; ++i) {
+            if (!mVideoReader->decodeFrame(true)) {
+                mVideoPlaybackTimeBank = 0.0;
+                mVideoPlaying = false;
+                break;
+            }
         }
         uploadVideoTexture();
     }
@@ -3310,10 +3743,14 @@ void App::renderVideoBlit(const ImGuiIO& io)
     glDisable(GL_DEPTH_TEST);
 
     mVideoBlitShader.bind();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, mVideoTexture);
     const bool cmp = videoCompareActive();
-    const float transportBarH = cmp ? 80.0f : 36.0f;
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float transportBarH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
     const float contentH =
         io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
     const Vec2f contentOrigin(0.0f, mToolbarHeight);
@@ -3322,28 +3759,39 @@ void App::renderVideoBlit(const ImGuiIO& io)
     mVideoBlitShader.setUniform("uWindowSize", Vec2f(io.DisplaySize.x, io.DisplaySize.y));
     mVideoBlitShader.setUniform("uContentOrigin", contentOrigin);
     mVideoBlitShader.setUniform("uContentSize", contentSize);
+
     if (cmp && mVideoTextureB != 0) {
+        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+        const GLuint t0 = dispSwap ? mVideoTextureB : mVideoTexture;
+        const GLuint t1 = dispSwap ? mVideoTexture : mVideoTextureB;
+        const MpvGlPlayer* r0 = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+        const MpvGlPlayer* r1 = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, t0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, t1);
+
         mVideoBlitShader.setUniform("uCompareMode", 1);
         mVideoBlitShader.setUniform("uVideo", 0);
         mVideoBlitShader.setUniform("uVideoR", 1);
-        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
-        // Presentation-only swap: bind textures/sizes according to what should appear on screen.
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, dispSwap ? mVideoTexture : mVideoTextureB);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, dispSwap ? mVideoTextureB : mVideoTexture);
-
-        const MFVideoReader* r0 = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
-        const MFVideoReader* r1 = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
-        mVideoBlitShader.setUniform(
-            "uVideoSize", Vec2f(r0->displayWidthForAspect(), r0->displayHeightForAspect()));
-        mVideoBlitShader.setUniform(
-            "uVideoSizeR", Vec2f(r1->displayWidthForAspect(), r1->displayHeightForAspect()));
+        mVideoBlitShader.setUniform("uVideoSize",
+            Vec2f(r0 ? r0->displayWidthForAspect() : 1.0f, r0 ? r0->displayHeightForAspect() : 1.0f));
+        mVideoBlitShader.setUniform("uVideoSizeR",
+            Vec2f(r1 ? r1->displayWidthForAspect() : 1.0f, r1 ? r1->displayHeightForAspect() : 1.0f));
         mVideoBlitShader.setUniform("uSplitPos", mViewSplitPos);
     } else {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, mVideoTexture);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, mVideoTexture);
+
         mVideoBlitShader.setUniform("uCompareMode", 0);
         mVideoBlitShader.setUniform("uVideo", 0);
+        mVideoBlitShader.setUniform("uVideoR", 1);
         mVideoBlitShader.setUniform("uVideoSize",
+            Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect()));
+        mVideoBlitShader.setUniform("uVideoSizeR",
             Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect()));
     }
     mVideoBlitShader.drawTriangle();
@@ -3364,7 +3812,13 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         return;
     }
     const bool cmp = videoCompareActive();
-    const float barH = cmp ? 80.0f : 36.0f;
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float barH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
     ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -3375,6 +3829,7 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     if (ImGui::Button(mVideoPlaying ? "Pause" : "Play")) {
         mVideoPlaying ^= true;
         mVideoPlaybackTimeBank = 0.0;
+        mVideoComparePlaybackBank = 0.0;
     }
     ImGui::SameLine();
     if (ImGui::Button("Close")) {
@@ -3425,8 +3880,8 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             };
 
             const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
-            const double dA = (mVideoReader) ? (std::max)(0.0, mVideoReader->durationSec()) : 0.0;
-            const double dB = (mVideoReaderB) ? (std::max)(0.0, mVideoReaderB->durationSec()) : 0.0;
+            const double dA = mVideoReader ? videoScrubSpanSec(mVideoReader.get()) : 0.0;
+            const double dB = mVideoReaderB ? videoScrubSpanSec(mVideoReaderB.get()) : 0.0;
             // "Left/Right" colors follow what is visible on screen.
             const double startLeft = dispSwap ? mVideoStartR : mVideoStartL;
             const double durLeft = dispSwap ? dB : dA;
@@ -3439,12 +3894,25 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const bool itemActive = ImGui::IsItemActive();
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
-        if (itemActive || itemActivated || valueChanged || itemClicked) {
+        const bool itemDeactivated = ImGui::IsItemDeactivated();
+        if (itemActivated) {
+            mVideoPlayingBeforeScrub = mVideoPlaying;
+        }
+        if (itemActive || itemActivated || valueChanged || itemClicked || itemDeactivated) {
             mVideoCompositionT = mVideoScrubValue;
             clampVideoCompositionT();
             mVideoPlaybackTimeBank = 0.0;
-            syncVideoDecodersToCompositionT();
             mVideoPlaying = false;
+            const VideoScrubDecodeHint scrubHint = videoScrubDecodeHint(itemActive, itemActivated, itemClicked,
+                valueChanged, itemDeactivated, ImGui::GetTime(), mVideoLastScrubDecodeTime);
+            if (scrubHint.run) {
+                syncVideoDecodersToCompositionT(scrubHint.maxReadCapPerStream);
+            }
+        }
+        if (itemDeactivated && mVideoPlayingBeforeScrub) {
+            mVideoPlaying = true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
         }
         if (!itemActive) {
             mVideoScrubValue = mVideoCompositionT;
@@ -3457,9 +3925,20 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         char maxBuf[32];
         formatVideoHms(tShown, tBuf, sizeof tBuf);
         formatVideoHms(tMax, maxBuf, sizeof maxBuf);
-        ImGui::Text("T %s / %s", tBuf, maxBuf);
-
-        ImGui::TextUnformatted("Offsets (composition time at media 0):");
+        const bool durRelL = mVideoReader && mVideoReader->isOpen() && mVideoReader->hasReliableDuration()
+            && mVideoReader->durationSec() > 0.001;
+        const bool durRelR = mVideoReaderB && mVideoReaderB->isOpen() && mVideoReaderB->hasReliableDuration()
+            && mVideoReaderB->durationSec() > 0.001;
+        const bool durRelCmp = durRelL && durRelR;
+        if (durRelCmp) {
+            ImGui::Text("T %s / %s", tBuf, maxBuf);
+        } else {
+            ImGui::Text("T %s / ?", tBuf);
+        }
+        if (!durRelCmp) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(duration unknown)");
+        }
 
         static char sOffBufL[64] = "";
         static char sOffBufR[64] = "";
@@ -3577,12 +4056,9 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     } else {
         const double pos = mVideoReader->positionSec();
         const double metaDur = mVideoReader->durationSec();
-        double durTotal = metaDur;
-        if (durTotal <= 0.001) {
-            durTotal = std::max(60.0, pos + 5.0);
-        }
-        double sliderMaxSec = std::max({durTotal, pos + 0.01, 0.25});
-        if (metaDur > 0.001) {
+        const bool durRel = mVideoReader->hasReliableDuration() && metaDur > 0.001;
+        double sliderMaxSec = std::max({videoScrubSpanSec(mVideoReader.get()), pos + 0.01, 0.25});
+        if (durRel) {
             const double frameDur = mVideoReader->frameDurationSec();
             const double endSlack = std::max(frameDur * 3.0, 0.1);
             const double seekableEnd = std::max(0.0, metaDur - endSlack);
@@ -3597,12 +4073,36 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const bool itemActive = ImGui::IsItemActive();
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
-        if (itemActive || itemActivated || valueChanged || itemClicked) {
+        const bool itemDeactivated = ImGui::IsItemDeactivated();
+        if (itemActivated) {
+            mVideoPlayingBeforeScrub = mVideoPlaying;
+        }
+        if (itemActive || itemActivated || valueChanged || itemClicked || itemDeactivated) {
             mVideoPlaybackTimeBank = 0.0;
-            mVideoReader->seek(mVideoScrubValue);
-            mVideoReader->decodeFrameThrough(mVideoScrubValue);
-            uploadVideoTexture();
             mVideoPlaying = false;
+            const VideoScrubDecodeHint scrubHint = videoScrubDecodeHint(itemActive, itemActivated, itemClicked,
+                valueChanged, itemDeactivated, ImGui::GetTime(), mVideoLastScrubDecodeTime);
+            if (scrubHint.run) {
+                mVideoReader->seek(mVideoScrubValue, scrubHint.maxReadCapPerStream <= 0);
+                mVideoReader->decodeFrameThrough(mVideoScrubValue, scrubHint.maxReadCapPerStream);
+                uploadVideoTexture();
+                if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
+                    LOGI(
+                        "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) "
+                        "decode+buf={:.2f}ms reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+                        scrubHint.maxReadCapPerStream, static_cast<double>(mVideoReader->lastSeekMs()),
+                        static_cast<double>(mVideoReader->lastSeekFlushMs()),
+                        static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+                        static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+                        mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+                        static_cast<double>(mVideoDbgLastUploadLMs), 0);
+                }
+            }
+        }
+        if (itemDeactivated && mVideoPlayingBeforeScrub) {
+            mVideoPlaying = true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
         }
         if (!itemActive) {
             mVideoScrubValue = mVideoReader->positionSec();
@@ -3614,13 +4114,39 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         char posBuf[32];
         char durBuf[32];
         formatVideoHms(tDisplayed, posBuf, sizeof posBuf);
-        formatVideoHms(durTotal, durBuf, sizeof durBuf);
-        if (metaDur > 0.001) {
+        formatVideoHms(metaDur, durBuf, sizeof durBuf);
+        if (durRel) {
             ImGui::Text("%s / %s", posBuf, durBuf);
         } else {
             ImGui::Text("%s / ?", posBuf);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(duration unknown)");
         }
     }
+
+#if defined(BAKTSIU_DEBUG_BUILD)
+    ImGui::Separator();
+    if (ImGui::Checkbox("Log pipeline (console)##videopipe", &mVideoLogPipelineTiming)) {
+        if (mVideoReader) {
+            mVideoReader->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
+        }
+        if (mVideoReaderB) {
+            mVideoReaderB->setPipelineTimingLog(videoPipelineDbgEnabled(mVideoLogPipelineTiming));
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("seek / decode+buf / upload ms");
+    ImGui::SameLine();
+    if (videoCompareActive()) {
+        ImGui::TextDisabled("dt %.1fms sync %.1fms drift L %+0.1fms R %+0.1fms",
+            static_cast<double>(mVideoDbgLastTickDtMs),
+            static_cast<double>(mVideoDbgLastSyncMs),
+            static_cast<double>(mVideoDbgLastDriftLMs),
+            static_cast<double>(mVideoDbgLastDriftRMs));
+    } else {
+        ImGui::TextDisabled("dt %.1fms", static_cast<double>(mVideoDbgLastTickDtMs));
+    }
+#endif
 
     ImGui::End();
     ImGui::PopStyleVar();

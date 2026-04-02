@@ -3,7 +3,7 @@
 
 #include "app.h"
 #include "docopt/docopt.h"
-#include "mf_video_reader.h"
+#include "mpv_gl_player.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -74,7 +74,7 @@ static int runMain(std::vector<std::string> argList)
             std::vector<std::string> imagePaths;
             std::vector<std::string> videoPaths;
             for (const std::string& n : names) {
-                if (baktsiu::MFVideoReader::isSupportedExtension(n)) {
+                if (baktsiu::MpvGlPlayer::isSupportedExtension(n)) {
                     videoPaths.push_back(n);
                 } else {
                     imagePaths.push_back(n);

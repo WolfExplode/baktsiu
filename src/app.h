@@ -3,7 +3,7 @@
 
 #include "common.h"
 #include "image.h"
-#include "mf_video_reader.h"
+#include "mpv_gl_player.h"
 #include "shader.h"
 #include "texture.h"
 #include "texture_pool.h"
@@ -241,11 +241,21 @@ private:
 
     bool    videoCompareActive() const;
 
+#if defined(USE_VIDEO)
+    // Match renderVideoBlit: drawable content rect below toolbar / above transport + footer.
+    void    getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const;
+    bool    getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const;
+    bool    getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const;
+#endif
+
     void    recomputeVideoScrubBounds(double& outMin, double& outMax) const;
 
     void    clampVideoCompositionT();
 
-    void    syncVideoDecodersToCompositionT();
+    // maxDecodeReadCapPerStream 0 = full decodeFrameThrough budget; >0 caps ReadSample count per stream (scrub preview).
+    void    syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream = 0);
+
+    void    resetVideoDecoderSyncCache();
 
     // Video scrub: direction -1 = earlier, +1 = later.
     void    stepVideoScrubFiveSeconds(int direction);
@@ -331,9 +341,10 @@ private:
     // Defer lazy duration probe so the first paint after open is not blocked by a full-stream read.
     int         mVideoLazyDurationGraceFrames = 0;
     double      mVideoPlaybackTimeBank = 0.0;
+    double      mVideoComparePlaybackBank = 0.0;
     double      mVideoScrubValue = 0.0;
-    std::unique_ptr<MFVideoReader> mVideoReader;
-    std::unique_ptr<MFVideoReader> mVideoReaderB;
+    std::unique_ptr<MpvGlPlayer> mVideoReader;
+    std::unique_ptr<MpvGlPlayer> mVideoReaderB;
     std::vector<std::string> mVideoPaths;
     int         mVideoIndexL = -1;
     int         mVideoIndexR = -1;
@@ -344,16 +355,27 @@ private:
     double      mVideoCompositionT = 0.0;
     double      mVideoStartL = 0.0;
     double      mVideoStartR = 0.0;
+    // Last targets used in syncVideoDecodersToCompositionT (skip redundant seek/decode when unchanged).
+    double      mVideoLastSyncedTargetMediaL = -1.0;
+    double      mVideoLastSyncedTargetMediaR = -1.0;
+    // ImGui::GetTime() of last scrub seek+decode; throttles decode work while dragging the slider.
+    double      mVideoLastScrubDecodeTime = -1.0e9;
+    // Snapshot when a scrub drag begins; used to resume playback after release if it was playing.
+    bool        mVideoPlayingBeforeScrub = false;
+    bool        mVideoLogPipelineTiming = false;
+    float       mVideoDbgLastUploadLMs = 0.f;
+    float       mVideoDbgLastUploadRMs = 0.f;
+    float       mVideoDbgLastSyncMs = 0.f;
+    float       mVideoDbgLastTickDtMs = 0.f;
+    float       mVideoDbgLastDriftLMs = 0.f;
+    float       mVideoDbgLastDriftRMs = 0.f;
+    double      mVideoDbgLastConsoleBeatSec = -1.0e9;
     // Presentation-only left/right swap for instant switching while playing.
     // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
     // remain in their original slots (mVideoReader/mVideoReaderB).
     bool        mVideoSwapPresentationLR = false;
     Shader      mVideoBlitShader;
     bool        mVideoShaderReady = false;
-
-#if defined(_WIN32) && defined(USE_VIDEO)
-    bool        mVideoComInitialized = false;
-#endif
 };
 
 }  // namespace baktsiu

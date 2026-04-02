@@ -16,8 +16,6 @@ out vec4 oColor;
 const vec4 kLetterbox = vec4(0.12, 0.14, 0.15, 1.0);
 
 // localBL: [0,1]^2 with (0,0) bottom-left, (1,1) top-right of the panel.
-// panelPx: panel size in pixels; vidSize: native video dimensions in pixels.
-// Scales video uniformly (contain) and centers it; no stretching.
 vec4 sampleContain(sampler2D tex, vec2 localBL, vec2 panelPx, vec2 vidSize)
 {
     float vw = max(vidSize.x, 1.0);
@@ -34,7 +32,6 @@ vec4 sampleContain(sampler2D tex, vec2 localBL, vec2 panelPx, vec2 vidSize)
     return texture(tex, vec2(vidUv.x, 1.0 - vidUv.y));
 }
 
-// vUV: (0,0) bottom-left of framebuffer; uWindowSize / content in top-left screen coords (y down).
 vec2 screenPxFromVUV(vec2 vUVin)
 {
     return vec2(vUVin.x * uWindowSize.x, (1.0 - vUVin.y) * uWindowSize.y);
@@ -64,7 +61,6 @@ void main()
         return;
     }
 
-    // Same full-content contain as single-video mode for both; split only selects which texel.
     vec4 cL = sampleContain(uVideo, local, uContentSize, uVideoSize);
     vec4 cR = sampleContain(uVideoR, local, uContentSize, uVideoSizeR);
     oColor = local.x < spx ? cL : cR;

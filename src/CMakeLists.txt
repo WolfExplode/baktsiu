@@ -63,16 +63,107 @@ endif()
 
 add_executable(${PROJECT_NAME} ${SRC_FILES} ${IMGUI_SRC_FILES} 
                ${GL3W_SRC_FILES} ${DOCOPT_SRC_FILES} ${EXTRA_SRC_FILES})
+# Video pipeline UI/logging and other debug-only hooks: Debug config only (not RelWithDebInfo / Release).
+target_compile_definitions(${PROJECT_NAME} PRIVATE $<$<CONFIG:Debug>:BAKTSIU_DEBUG_BUILD=1>)
 source_group("External Files\\gl3w"   FILES ${GL3W_SRC_FILES})
 source_group("External Files\\imgui"  FILES ${IMGUI_SRC_FILES})
 source_group("External Files\\docopt" FILES ${DOCOPT_SRC_FILES})
 
 set(VIDEO_LIBS "")
 if(WIN32 AND USE_VIDEO)
-    list(APPEND VIDEO_LIBS mfplat mfreadwrite mfuuid strmiids ole32 propsys Shlwapi)
+    # Default search path when MPV_ROOT is unset (see third_party/mpv/README.md).
+    set(_baktsiu_mpv_repo_default "${CMAKE_SOURCE_DIR}/third_party/mpv")
+
+    set(MPV_ROOT "" CACHE PATH "Root of a libmpv dev tree (optional; used to find headers/lib when MPV_* are empty)")
+    set(MPV_INCLUDE_DIR "" CACHE PATH "Directory containing mpv/client.h (leave empty to search via MPV_ROOT / MPV_ROOT env)")
+    set(MPV_LIBRARY "" CACHE FILEPATH "mpv import .lib (leave empty to search via MPV_ROOT / MPV_ROOT env)")
+    set(MPV_DLL "" CACHE FILEPATH "libmpv-2.dll (optional; copied next to the executable if set)")
+
+    if(NOT MPV_INCLUDE_DIR)
+        # Typical: <root>/include/mpv/client.h (#include <mpv/client.h> → add .../include).
+        # Also common: <root>/mpv/client.h (add .../root).
+        find_path(_baktsiu_mpv_include
+            NAMES mpv/client.h
+            HINTS "${MPV_ROOT}" "${_baktsiu_mpv_repo_default}" ENV MPV_ROOT
+            PATH_SUFFIXES include "")
+        if(_baktsiu_mpv_include)
+            set(MPV_INCLUDE_DIR "${_baktsiu_mpv_include}" CACHE PATH "Directory containing mpv/client.h" FORCE)
+        endif()
+    endif()
+    if(NOT MPV_INCLUDE_DIR)
+        # Some trees only expose .../include/mpv/client.h to find_path as plain client.h.
+        find_path(_baktsiu_mpv_client_h
+            NAMES client.h
+            HINTS "${MPV_ROOT}" "${_baktsiu_mpv_repo_default}" ENV MPV_ROOT
+            PATH_SUFFIXES "include/mpv" mpv)
+        if(_baktsiu_mpv_client_h)
+            get_filename_component(_baktsiu_mpv_include_from_sub "${_baktsiu_mpv_client_h}" DIRECTORY)
+            get_filename_component(_baktsiu_mpv_include_parent "${_baktsiu_mpv_include_from_sub}" DIRECTORY)
+            if(EXISTS "${_baktsiu_mpv_include_parent}/mpv/client.h")
+                set(MPV_INCLUDE_DIR "${_baktsiu_mpv_include_parent}" CACHE PATH "Directory containing mpv/client.h" FORCE)
+            endif()
+        endif()
+    endif()
+    if(NOT MPV_LIBRARY)
+        find_library(_baktsiu_mpv_lib
+            NAMES libmpv-2 mpv libmpv mpv-2 mpv-1
+            HINTS "${MPV_ROOT}" "${MPV_ROOT}/lib" "${_baktsiu_mpv_repo_default}" "${_baktsiu_mpv_repo_default}/lib"
+                ENV MPV_ROOT
+            PATH_SUFFIXES "" lib lib/x64)
+        if(_baktsiu_mpv_lib)
+            set(MPV_LIBRARY "${_baktsiu_mpv_lib}" CACHE FILEPATH "libmpv import library" FORCE)
+        endif()
+    endif()
+    if(NOT MPV_DLL)
+        set(_baktsiu_mpv_dll_hints)
+        list(APPEND _baktsiu_mpv_dll_hints "${_baktsiu_mpv_repo_default}")
+        if(MPV_ROOT)
+            list(APPEND _baktsiu_mpv_dll_hints "${MPV_ROOT}")
+        endif()
+        if(DEFINED ENV{MPV_ROOT})
+            list(APPEND _baktsiu_mpv_dll_hints "$ENV{MPV_ROOT}")
+        endif()
+        if(MPV_LIBRARY)
+            get_filename_component(_baktsiu_mpv_libdir "${MPV_LIBRARY}" DIRECTORY)
+            list(APPEND _baktsiu_mpv_dll_hints "${_baktsiu_mpv_libdir}" "${_baktsiu_mpv_libdir}/..")
+        endif()
+        if(_baktsiu_mpv_dll_hints)
+            find_file(_baktsiu_mpv_dll
+                NAMES libmpv-2.dll mpv-2.dll mpv.dll
+                HINTS ${_baktsiu_mpv_dll_hints}
+                PATH_SUFFIXES "" bin)
+            if(_baktsiu_mpv_dll)
+                set(MPV_DLL "${_baktsiu_mpv_dll}" CACHE FILEPATH "libmpv-2.dll (optional; post-build copy)" FORCE)
+            endif()
+        endif()
+    endif()
+
+    if(NOT MPV_INCLUDE_DIR OR NOT MPV_LIBRARY)
+        message(FATAL_ERROR
+            "USE_VIDEO is ON but libmpv was not found.\n"
+            "  Extract mpv-dev into third_party/mpv (see third_party/mpv/README.md), or set CMake cache MPV_ROOT,\n"
+            "  or MPV_INCLUDE_DIR + MPV_LIBRARY, or environment MPV_ROOT, or turn off video: -DUSE_VIDEO=OFF\n"
+            "  (headers need mpv/client.h; link against the mpv import .lib; run with libmpv-2.dll next to the exe).")
+    endif()
+    if(NOT EXISTS "${MPV_INCLUDE_DIR}/mpv/client.h")
+        message(FATAL_ERROR
+            "USE_VIDEO: MPV_INCLUDE_DIR does not contain mpv/client.h.\n"
+            "  MPV_INCLUDE_DIR=${MPV_INCLUDE_DIR}\n"
+            "  Expected file: ${MPV_INCLUDE_DIR}/mpv/client.h\n"
+            "  Clear MPV_INCLUDE_DIR in the CMake cache and set MPV_ROOT to the extracted mpv-dev folder, or point\n"
+            "  MPV_INCLUDE_DIR at the directory that *contains* the \"mpv\" subfolder (often .../include, not .../include/mpv).")
+    endif()
+    target_include_directories(${PROJECT_NAME} PRIVATE "${MPV_INCLUDE_DIR}")
+    list(APPEND VIDEO_LIBS "${MPV_LIBRARY}")
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS})
+
+if(WIN32 AND USE_VIDEO AND MPV_DLL)
+    add_custom_command(
+        TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MPV_DLL}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+endif()
 
 if(USE_OPENEXR AND WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE zlibstatic)
