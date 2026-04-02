@@ -920,7 +920,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
 void    App::updateImageSplitterPos(ImGuiIO& io)
 {
 #if defined(USE_VIDEO)
-    const bool splitForVideoCompare = mVideoMode && videoCompareActive();
+    const bool splitForVideoCompare = mVideoMode && videoCompareActive() && mCompositeFlags != CompositeFlags::Top;
 #else
     const bool splitForVideoCompare = false;
 #endif
@@ -1269,13 +1269,22 @@ void    App::initToolbar()
     static float centeredToolItemWidth = 506.0f;
     ImGui::SameLine((g.IO.DisplaySize.x - centeredToolItemWidth) * 0.5f);
     float centeredToolBeginPos = g.CurrentWindow->DC.CursorPos.x;
-    ToggleButton(ICON_FA_FEATHER, &mUseLinearFilter, buttonSize);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Smooth image");
+#if defined(USE_VIDEO)
+    if (!mVideoMode) {
+#endif
+        ToggleButton(ICON_FA_FEATHER, &mUseLinearFilter, buttonSize);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Smooth image");
+        }
+        ImGui::SameLine();
+#if defined(USE_VIDEO)
     }
-
-    ImGui::SameLine();
+#endif
+#if defined(USE_VIDEO)
+    const bool couldCompare = (mImageList.size() > 1) || (mVideoMode && videoCompareActive());
+#else
     const bool couldCompare = mImageList.size() > 1;
+#endif
     bool inSplitView = (mCompositeFlags == CompositeFlags::Split);
     if (ToggleButton(ICON_FA_I_CURSOR, &inSplitView, buttonSize, couldCompare)) {
         toggleSplitView();
@@ -1350,6 +1359,9 @@ void    App::initToolbar()
 
     ImGui::SameLine();
     ToggleButton(ICON_FA_FILM, &mEnableToneMapping, buttonSize, mCurrentPresentMode == 0);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ACES tone mapping (only when Channels is RGB)");
+    }
 
     ImGui::SameLine();
     ToggleButton(ICON_FA_EXCLAMATION_TRIANGLE, &mShowPixelMarker, buttonSize);
@@ -1371,14 +1383,15 @@ void    App::initToolbar()
         }
 
         const bool showDiffMarker = hasAnyFlags(mPixelMarkerFlags, PixelMarkerFlags::DiffMask);
-        
+        const bool overflowMenuEnabled = !enableCompareView || !showDiffMarker;
+
         itemValue = hasAllFlags(mPixelMarkerFlags, PixelMarkerFlags::Overflow);
-        if (ImGui::MenuItem("Overflow", "", &itemValue, !enableCompareView || !showDiffMarker)) {
+        if (ImGui::MenuItem("Overflow", "", &itemValue, overflowMenuEnabled)) {
             mPixelMarkerFlags = toggleFlags(mPixelMarkerFlags, PixelMarkerFlags::Overflow);
         }
 
         itemValue = hasAllFlags(mPixelMarkerFlags, PixelMarkerFlags::Underflow);
-        if (ImGui::MenuItem("Underflow", "", &itemValue, !enableCompareView || !showDiffMarker)) {
+        if (ImGui::MenuItem("Underflow", "", &itemValue, overflowMenuEnabled)) {
             mPixelMarkerFlags = toggleFlags(mPixelMarkerFlags, PixelMarkerFlags::Underflow);
         }
 
@@ -2598,10 +2611,11 @@ int App::getPixelMarkerFlags() const
     }
 
     PixelMarkerFlags flags = mPixelMarkerFlags;
+    // Compare (two images or two videos): only diff/heatmap reach the shader, same as present.frag / video_blit.
     if (inCompareMode()) {
-        flags &= PixelMarkerFlags::DiffMask;  // Only keeps pixel differnce marker.
+        flags &= PixelMarkerFlags::DiffMask;
     } else {
-        flags &= ~PixelMarkerFlags::DiffMask; // Clear any flags for difference modes.
+        flags &= ~PixelMarkerFlags::DiffMask;
     }
 
     return static_cast<int>(flags);
@@ -2609,21 +2623,38 @@ int App::getPixelMarkerFlags() const
 
 inline void    App::toggleSplitView()
 {
-    if (mCmpImageIndex != -1) {
+    const bool canCompare = (mCmpImageIndex != -1)
+#if defined(USE_VIDEO)
+        || videoCompareActive()
+#endif
+        ;
+    if (canCompare) {
         mCompositeFlags = toggleFlags(mCompositeFlags & ~CompositeFlags::SideBySide, CompositeFlags::Split);
     }
 }
 
 inline void    App::toggleSideBySideView()
 {
-    if (mCmpImageIndex != -1) {
+    const bool canCompare = (mCmpImageIndex != -1)
+#if defined(USE_VIDEO)
+        || videoCompareActive()
+#endif
+        ;
+    if (canCompare) {
         mCompositeFlags = toggleFlags(mCompositeFlags & ~CompositeFlags::Split, CompositeFlags::SideBySide);
     }
 }
 
 inline bool    App::inCompareMode() const
 {
-    return mCmpImageIndex != -1 && (mCompositeFlags & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+    const bool layoutIsCompare =
+        (mCompositeFlags & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+#if defined(USE_VIDEO)
+    if (mVideoMode) {
+        return videoCompareActive() && layoutIsCompare;
+    }
+#endif
+    return mCmpImageIndex != -1 && layoutIsCompare;
 }
 
 inline bool    App::inSideBySideMode() const
@@ -3373,6 +3404,11 @@ void App::openVideosFromSelection()
     mVideoMode = true;
     mVideoPlaying = true;
     mVideoPlaybackTimeBank = 0.0;
+    if (mVideoReaderB && mVideoReaderB->isOpen()) {
+        mCompositeFlags = CompositeFlags::Split;
+    } else {
+        mCompositeFlags = CompositeFlags::Top;
+    }
 
     mVideoPathL = pathL;
     mVideoPathR = pathR;
@@ -3772,7 +3808,15 @@ void App::renderVideoBlit(const ImGuiIO& io)
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, t1);
 
-        mVideoBlitShader.setUniform("uCompareMode", 1);
+        int compareMode = 1;
+        if (mCompositeFlags == CompositeFlags::Top) {
+            compareMode = 0;
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, t0);
+        } else if (mCompositeFlags == CompositeFlags::SideBySide) {
+            compareMode = 2;
+        }
+        mVideoBlitShader.setUniform("uCompareMode", compareMode);
         mVideoBlitShader.setUniform("uVideo", 0);
         mVideoBlitShader.setUniform("uVideoR", 1);
         mVideoBlitShader.setUniform("uVideoSize",
@@ -3794,6 +3838,12 @@ void App::renderVideoBlit(const ImGuiIO& io)
         mVideoBlitShader.setUniform("uVideoSizeR",
             Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect()));
     }
+    mVideoBlitShader.setUniform("uOutTransformType", mOutTransformType);
+    mVideoBlitShader.setUniform("uDisplayGamma", mDisplayGamma);
+    mVideoBlitShader.setUniform("uEV", mExposureValue);
+    mVideoBlitShader.setUniform("uPresentMode", mCurrentPresentMode);
+    mVideoBlitShader.setUniform("uApplyToneMapping", mEnableToneMapping);
+    mVideoBlitShader.setUniform("uPixelMarkerFlags", getPixelMarkerFlags());
     mVideoBlitShader.drawTriangle();
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, 0);
