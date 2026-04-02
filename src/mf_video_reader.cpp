@@ -1,10 +1,12 @@
 #include "mf_video_reader.h"
 
 #include "common.h"
+#include "mp4_iso_duration.h"
 
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <utility>
 
 #if defined(_WIN32) && defined(USE_VIDEO)
 
@@ -32,6 +34,17 @@ namespace
 {
 
 int g_mfStartupRef = 0;
+
+double qpcMs(const LARGE_INTEGER& a, const LARGE_INTEGER& b)
+{
+    static LARGE_INTEGER freq;
+    static bool haveFreq = false;
+    if (!haveFreq) {
+        QueryPerformanceFrequency(&freq);
+        haveFreq = true;
+    }
+    return static_cast<double>(b.QuadPart - a.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
 
 void mfStartupAddRef()
 {
@@ -220,22 +233,92 @@ bool readVideoOutputInfo(IMFSourceReader* reader, int& outW, int& outH, int& str
     return outW > 0 && outH > 0;
 }
 
-double readPresentationDuration(IMFSourceReader* reader)
+// Duration at open: MF_PD_DURATION, then ISO BMFF moov (.mp4/.m4v/.mov) when MF omits it.
+// lazyProbePresentationDuration (see MFVideoReader) runs only if duration is still unknown after open
+// and the path is not ISO BMFF — then we may scan the video stream toward EOS (time/sample capped).
+double readPresentationDuration(IMFSourceReader* reader, HRESULT* outHr = nullptr, VARTYPE* outVt = nullptr)
 {
+    if (outHr) {
+        *outHr = E_FAIL;
+    }
+    if (outVt) {
+        *outVt = VT_EMPTY;
+    }
     PROPVARIANT var;
     PropVariantInit(&var);
     double sec = 0.0;
-    HRESULT hr = reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var);
-    if (SUCCEEDED(hr) && var.vt == VT_I8) {
-        sec = static_cast<double>(var.hVal.QuadPart) / 10000000.0;
+    const HRESULT hr =
+        reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var);
+    if (outHr) {
+        *outHr = hr;
+    }
+    if (outVt) {
+        *outVt = var.vt;
+    }
+    // MF sometimes stores presentation duration as VT_UI8 (100-ns units), not only VT_I8.
+    if (SUCCEEDED(hr)) {
+        if (var.vt == VT_I8) {
+            sec = static_cast<double>(var.hVal.QuadPart) / 10000000.0;
+        } else if (var.vt == VT_UI8) {
+            sec = static_cast<double>(var.uhVal.QuadPart) / 10000000.0;
+        }
     }
     PropVariantClear(&var);
     return sec;
 }
 
-// Walk the video stream to the last sample time (MF_PD_DURATION is often missing on MP4).
-double probeVideoEndSec(IMFSourceReader* reader)
+constexpr double kDurationEpsilonSec = 0.001;
+
+// Clamp requested media time slightly inside presentation end (seeking to exact duration often fails).
+double seekEndCapSec(double durationSec, double frameDurationSec)
 {
+    if (durationSec <= kDurationEpsilonSec) {
+        return durationSec;
+    }
+    const double endSlack = std::max(frameDurationSec * 3.0, 0.1);
+    return std::max(0.0, durationSec - endSlack);
+}
+
+void resolveMetadataDurationSec(
+    IMFSourceReader* reader, const std::string& utf8Path, double& outSec, bool& outReliable)
+{
+    HRESULT mfHr = E_FAIL;
+    VARTYPE mfVt = VT_EMPTY;
+    outSec = readPresentationDuration(reader, &mfHr, &mfVt);
+    LOGI(
+        "[duration] \"{}\": MF_PD_DURATION hr=0x{:x} vt={} -> {:.6f}s",
+        utf8Path, static_cast<unsigned>(mfHr), static_cast<unsigned>(mfVt), outSec);
+
+    if (outSec <= kDurationEpsilonSec) {
+        if (pathLooksIsoBmff(utf8Path)) {
+            const double isoDur = tryReadIsoBmffDurationSecondsFromUtf8Path(utf8Path);
+            if (isoDur > kDurationEpsilonSec) {
+                outSec = isoDur;
+            } else {
+                LOGW(
+                    "[duration] \"{}\": ISO returned no duration (see [duration][iso] lines above for head/tail/moov)",
+                    utf8Path);
+            }
+        } else {
+            LOGI(
+                "[duration] \"{}\": ISO BMFF not attempted (not .mp4/.m4v/.mov); stream lazy-probe may run later",
+                utf8Path);
+        }
+    }
+    outReliable = (outSec > kDurationEpsilonSec);
+    LOGI("[duration] \"{}\": metadata result reliable={} durationSec={:.6f}", utf8Path, outReliable, outSec);
+}
+
+struct ProbeVideoEndResult {
+    double endSec = 0.0;
+    bool reachedEos = false;
+};
+
+// Walk the video stream to the last sample time (MF_PD_DURATION is often missing on MP4).
+// If we stop on time/sample limits before EOS, endSec is only a partial max timestamp — do not use as duration.
+ProbeVideoEndResult probeVideoEndSec(IMFSourceReader* reader)
+{
+    ProbeVideoEndResult out;
     HRESULT hr = reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
     if (FAILED(hr)) {
         reader->Flush((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM);
@@ -262,8 +345,24 @@ double probeVideoEndSec(IMFSourceReader* reader)
 
     LONGLONG maxHns = 0;
     int n = 0;
-    constexpr int kMaxProbeSamples = 500000;
+    constexpr int kMaxProbeSamples = 65536;
+    constexpr double kProbeTimeBudgetMs = 2000.0;
+    LARGE_INTEGER probeT0;
+    LARGE_INTEGER probeFreq;
+    QueryPerformanceFrequency(&probeFreq);
+    QueryPerformanceCounter(&probeT0);
+
     while (n < kMaxProbeSamples) {
+        LARGE_INTEGER probeNow;
+        QueryPerformanceCounter(&probeNow);
+        const double elapsedMs =
+            static_cast<double>(probeNow.QuadPart - probeT0.QuadPart) * 1000.0
+            / static_cast<double>(probeFreq.QuadPart);
+        if (elapsedMs >= kProbeTimeBudgetMs) {
+            LOGW("probeVideoEndSec: time budget {:.0f} ms reached at {} samples (no EOS — duration not trusted)",
+                kProbeTimeBudgetMs, n);
+            break;
+        }
         ++n;
         IMFSample* sample = nullptr;
         DWORD streamFlags = 0;
@@ -276,8 +375,17 @@ double probeVideoEndSec(IMFSourceReader* reader)
         }
         if (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
             if (sample) {
+                LONGLONG t = 0;
+                if (SUCCEEDED(sample->GetSampleTime(&t)) && t >= 0) {
+                    if (t > maxHns) {
+                        maxHns = t;
+                    }
+                } else if (ts > maxHns) {
+                    maxHns = ts;
+                }
                 sample->Release();
             }
+            out.reachedEos = true;
             break;
         }
         if (streamFlags & MF_SOURCE_READERF_STREAMTICK) {
@@ -307,7 +415,17 @@ double probeVideoEndSec(IMFSourceReader* reader)
     reader->SetCurrentPosition(GUID_NULL, var);
     PropVariantClear(&var);
 
-    return static_cast<double>(maxHns) / 10000000.0;
+    if (n >= kMaxProbeSamples && !out.reachedEos) {
+        LOGW("probeVideoEndSec: sample cap {} reached without EOS (duration not trusted)", kMaxProbeSamples);
+    }
+
+    LARGE_INTEGER probeT1;
+    QueryPerformanceCounter(&probeT1);
+    out.endSec = static_cast<double>(maxHns) / 10000000.0;
+    LOGI("probeVideoEndSec: {:.2f} ms ({} samples, maxT={:.3f}s, eos={})", qpcMs(probeT0, probeT1), n, out.endSec,
+        out.reachedEos);
+
+    return out;
 }
 
 inline uint8_t clampByte(int v)
@@ -525,7 +643,42 @@ struct MFVideoReaderDecodeDetail
             }
             const uint8_t* yPlane = data;
             const uint8_t* uvPlane = data + yPlaneBytes;
-            nv12ToRgba(yPlane, uvPlane, r.m_strideBytes, r.m_width, r.m_height, r.m_rgba.data());
+            if (r.m_gpuNv12Path) {
+                r.m_nv12.resize(nv12Need);
+                std::memcpy(r.m_nv12.data(), yPlane, nv12Need);
+                r.m_nv12YBufRows = nv12BufH;
+                if (r.m_nv12DiagLogFrames > 0) {
+                    --r.m_nv12DiagLogFrames;
+                    const uint8_t* py = r.m_nv12.data();
+                    const uint8_t* puv = py + yPlaneBytes;
+                    auto rowMinMax = [&](int yRow) -> std::pair<uint8_t, uint8_t> {
+                        uint8_t lo = 255;
+                        uint8_t hi = 0;
+                        const uint8_t* row = py + static_cast<size_t>(yRow) * stride;
+                        for (int x = 0; x < r.m_width; ++x) {
+                            const uint8_t v = row[static_cast<size_t>(x)];
+                            lo = (std::min)(lo, v);
+                            hi = (std::max)(hi, v);
+                        }
+                        return {lo, hi};
+                    };
+                    const int yMid = r.m_height > 1 ? r.m_height / 2 : 0;
+                    const int yLast = r.m_height > 0 ? r.m_height - 1 : 0;
+                    const auto mm0 = rowMinMax(0);
+                    const auto mmM = rowMinMax(yMid);
+                    const auto mmL = rowMinMax(yLast);
+                    LOGI(
+                        "NV12 cpu buffer diag: pic={}x{} stride={} bufH={} curLen={} "
+                        "Y row0 min/max={}/{} mid[{}]={}/{} last={}/{} UV[0..3]={:02x}{:02x}{:02x}{:02x} "
+                        "displayW={:.2f} PAR={}:{}",
+                        r.m_width, r.m_height, r.m_strideBytes, nv12BufH, static_cast<unsigned>(curLen),
+                        mm0.first, mm0.second, yMid, mmM.first, mmM.second, mmL.first, mmL.second, puv[0],
+                        puv[1], puv[2], puv[3], r.displayWidthForAspect(), r.m_pixelAspectNum,
+                        r.m_pixelAspectDen);
+                }
+            } else {
+                nv12ToRgba(yPlane, uvPlane, r.m_strideBytes, r.m_width, r.m_height, r.m_rgba.data());
+            }
         }
 
         buf->Unlock();
@@ -577,12 +730,19 @@ bool MFVideoReader::isSupportedExtension(const std::string& filepath)
 
 bool MFVideoReader::open(const std::string& utf8Path)
 {
+    LARGE_INTEGER tOpenStart;
+    QueryPerformanceCounter(&tOpenStart);
+
     close();
 
     mfStartupAddRef();
     if (g_mfStartupRef <= 0) {
         return false;
     }
+
+    LARGE_INTEGER t0;
+    LARGE_INTEGER t1;
+    QueryPerformanceCounter(&t0);
 
     IMFSourceReader* reader = nullptr;
     HRESULT hr = E_FAIL;
@@ -607,9 +767,14 @@ bool MFVideoReader::open(const std::string& utf8Path)
     }
 
     m_reader = reader;
+    QueryPerformanceCounter(&t1);
+    const double msMfCreate = qpcMs(t0, t1);
+
+    QueryPerformanceCounter(&t0);
 
     m_pixelAspectNum = 1;
     m_pixelAspectDen = 1;
+    m_gpuNv12Path = false;
     IMFMediaType* nativeType = nullptr;
     if (SUCCEEDED(reader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nativeType))
         && nativeType) {
@@ -625,15 +790,17 @@ bool MFVideoReader::open(const std::string& utf8Path)
         nativeType->Release();
     }
 
-    if (!configureOutputType(reader, MFVideoFormat_RGB32)) {
-        if (!configureOutputType(reader, MFVideoFormat_NV12)) {
-            LOGE("Could not set video output type (RGB32/NV12)");
+    if (!configureOutputType(reader, MFVideoFormat_NV12)) {
+        if (!configureOutputType(reader, MFVideoFormat_RGB32)) {
+            LOGE("Could not set video output type (NV12/RGB32)");
             close();
             return false;
         }
-        m_outputRgb32 = false;
-    } else {
         m_outputRgb32 = true;
+        m_gpuNv12Path = false;
+    } else {
+        m_outputRgb32 = false;
+        m_gpuNv12Path = true;
     }
 
     if (!readVideoOutputInfo(reader, m_width, m_height, m_strideBytes, m_outputRgb32, m_frameDurationSec)) {
@@ -666,18 +833,43 @@ bool MFVideoReader::open(const std::string& utf8Path)
         return false;
     }
 
-    m_durationSec = readPresentationDuration(reader);
+    QueryPerformanceCounter(&t1);
+    const double msCfg = qpcMs(t0, t1);
+
+    QueryPerformanceCounter(&t0);
+    resolveMetadataDurationSec(reader, utf8Path, m_durationSec, m_durationReliable);
     m_lazyDurationProbeDone = false;
-    // Missing MF_PD_DURATION is common on MP4; probing here reads the entire stream and blocks open.
-    // lazyProbePresentationDuration() runs later (after a short UI grace period).
+    m_skipLazyStreamProbe = pathLooksIsoBmff(utf8Path);
+    QueryPerformanceCounter(&t1);
+    const double msMeta = qpcMs(t0, t1);
 
-    m_rgba.resize(static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u);
+    if (m_outputRgb32 || !m_gpuNv12Path) {
+        m_rgba.resize(static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u);
+    } else {
+        m_rgba.clear();
+        m_nv12.clear();
+        m_nv12YBufRows = 0;
+    }
 
+    QueryPerformanceCounter(&t0);
     seek(0.0);
     if (!decodeFrame()) {
         LOGE("Failed to decode first video frame (codec/buffer layout may be unsupported)");
         close();
         return false;
+    }
+    QueryPerformanceCounter(&t1);
+    const double msFirstDecode = qpcMs(t0, t1);
+
+    LARGE_INTEGER tOpenEnd;
+    QueryPerformanceCounter(&tOpenEnd);
+    LOGI(
+        "MFVideoReader open \"{}\": total {:.2f} ms (mfCreate {:.2f}, cfg {:.2f}, meta {:.2f}, firstDecode "
+        "{:.2f}) nv12Gpu={} durationReliable={} durationSec={:.6f} skipLazyStreamProbe={}",
+        utf8Path, qpcMs(tOpenStart, tOpenEnd), msMfCreate, msCfg, msMeta, msFirstDecode, m_gpuNv12Path,
+        m_durationReliable, m_durationSec, m_skipLazyStreamProbe);
+    if (m_gpuNv12Path) {
+        m_nv12DiagLogFrames = 3;
     }
     return true;
 }
@@ -700,8 +892,14 @@ void MFVideoReader::close()
     m_pixelAspectNum = 1;
     m_pixelAspectDen = 1;
     m_durationSec = m_positionSec = 0.0;
+    m_durationReliable = false;
     m_frameDurationSec = 1.0 / 30.0;
+    m_gpuNv12Path = false;
     m_lazyDurationProbeDone = false;
+    m_skipLazyStreamProbe = false;
+    m_nv12.clear();
+    m_nv12YBufRows = 0;
+    m_nv12DiagLogFrames = 0;
     m_rgba.clear();
 }
 
@@ -715,15 +913,34 @@ bool MFVideoReader::lazyProbePresentationDuration()
     if (!m_reader || m_lazyDurationProbeDone) {
         return false;
     }
-    if (m_durationSec > 0.001) {
+    if (m_durationSec > kDurationEpsilonSec) {
+        m_lazyDurationProbeDone = true;
+        return false;
+    }
+    if (m_skipLazyStreamProbe) {
+        LOGI(
+            "[duration] lazyProbe skipped: ISO BMFF path (stream EOS scan disabled after open); if duration "
+            "unknown, moov was not in file head/tail parse window");
         m_lazyDurationProbeDone = true;
         return false;
     }
     m_lazyDurationProbeDone = true;
     IMFSourceReader* reader = static_cast<IMFSourceReader*>(m_reader);
-    const double probed = probeVideoEndSec(reader);
-    if (probed > 0.001) {
-        m_durationSec = probed;
+    LOGI("[duration] lazyProbe: scanning video stream toward EOS (time/sample capped)");
+    LARGE_INTEGER tProbe0;
+    LARGE_INTEGER tProbe1;
+    QueryPerformanceCounter(&tProbe0);
+    const ProbeVideoEndResult pr = probeVideoEndSec(reader);
+    QueryPerformanceCounter(&tProbe1);
+    LOGI("lazyProbePresentationDuration: {:.2f} ms", qpcMs(tProbe0, tProbe1));
+    if (pr.reachedEos && pr.endSec > 0.001) {
+        m_durationSec = pr.endSec;
+        m_durationReliable = true;
+    } else if (!pr.reachedEos && pr.endSec > 0.001) {
+        LOGW(
+            "lazyProbePresentationDuration: incomplete scan (max sample time {:.3f}s) — not using as duration; "
+            "use container metadata or a full read for long files",
+            pr.endSec);
     }
     // probeVideoEndSec leaves the reader at t=0; caller must resync to the current composition time.
     return true;
@@ -737,11 +954,8 @@ void MFVideoReader::seek(double seconds)
     IMFSourceReader* reader = static_cast<IMFSourceReader*>(m_reader);
     constexpr double kMaxSeekSec = 86400.0 * 366.0 * 50.0;
     seconds = std::max(0.0, std::min(seconds, kMaxSeekSec));
-    // Seeking exactly to probed duration often fails (0xc00d36e5); stay slightly inside the stream.
-    if (m_durationSec > 0.001) {
-        const double endSlack = std::max(m_frameDurationSec * 3.0, 0.1);
-        const double seekCap = std::max(0.0, m_durationSec - endSlack);
-        seconds = std::min(seconds, seekCap);
+    if (m_durationSec > kDurationEpsilonSec) {
+        seconds = std::min(seconds, seekEndCapSec(m_durationSec, m_frameDurationSec));
     }
 
     // Flush all streams so audio/subtitle queues do not leave the reader out of sync after a seek.
@@ -831,10 +1045,8 @@ bool MFVideoReader::decodeFrameThrough(double targetSec)
     }
     IMFSourceReader* reader = static_cast<IMFSourceReader*>(m_reader);
 
-    if (m_durationSec > 0.001) {
-        const double endSlack = std::max(m_frameDurationSec * 3.0, 0.1);
-        const double targetCap = std::max(0.0, m_durationSec - endSlack);
-        targetSec = std::min(targetSec, targetCap);
+    if (m_durationSec > kDurationEpsilonSec) {
+        targetSec = std::min(targetSec, seekEndCapSec(m_durationSec, m_frameDurationSec));
     }
 
     const double targetHnsD = targetSec * 10000000.0;
@@ -852,7 +1064,11 @@ bool MFVideoReader::decodeFrameThrough(double targetSec)
     DWORD actualStream = 0;
 
     int readIterations = 0;
-    const int kBudget = static_cast<int>(m_durationSec * 130.0 + 2048.0);
+    // Read budget must cover keyframe→target; scale with span. 130 ≈ headroom above nominal fps; 2048
+    // base iterations for short clips. When duration unknown, span uses targetSec so long seeks work.
+    const double spanForIterBudget =
+        (m_durationSec > kDurationEpsilonSec) ? m_durationSec : (std::max)(targetSec, 0.0);
+    const int kBudget = static_cast<int>(spanForIterBudget * 130.0 + 2048.0);
     const int kMaxReadIterations = (std::min)(200000, (std::max)(16384, kBudget));
     while (readIterations < kMaxReadIterations) {
         ++readIterations;
@@ -960,7 +1176,14 @@ void MFVideoReader::close()
     m_pixelAspectNum = 1;
     m_pixelAspectDen = 1;
     m_durationSec = m_positionSec = 0.0;
+    m_durationReliable = false;
     m_frameDurationSec = 1.0 / 30.0;
+    m_gpuNv12Path = false;
+    m_lazyDurationProbeDone = false;
+    m_skipLazyStreamProbe = false;
+    m_nv12.clear();
+    m_nv12YBufRows = 0;
+    m_nv12DiagLogFrames = 0;
     m_rgba.clear();
 }
 

@@ -31,6 +31,9 @@ public:
     float displayWidthForAspect() const;
     float displayHeightForAspect() const;
     double durationSec() const { return m_durationSec; }
+    // True when duration came from MF_PD_DURATION, ISO BMFF parse, or a probe that reached EOS.
+    // False when unknown or when a time/sample-limited probe did not finish the stream.
+    bool hasReliableDuration() const { return m_durationReliable; }
     double positionSec() const { return m_positionSec; }
     double frameDurationSec() const { return m_frameDurationSec; }
 
@@ -42,9 +45,17 @@ public:
 
     const uint8_t* rgbaBuffer() const { return m_rgba.data(); }
 
-    // If presentation duration was missing at open(), probe the stream once (expensive). Call from the
-    // main thread after the first frames are visible. Returns true if the reader was rewound to t=0
-    // (caller should seek/decode back to the current UI time, e.g. syncVideoDecodersToCompositionT).
+    // NV12 GPU upload path: Y+UV in nv12Buffer(), dimensions via nv12StrideBytes / nv12YTexHeight.
+    bool usesGpuNv12Path() const { return m_gpuNv12Path && !m_outputRgb32; }
+    const uint8_t* nv12Buffer() const { return m_nv12.empty() ? nullptr : m_nv12.data(); }
+    int nv12StrideBytes() const { return m_strideBytes; }
+    int nv12YTexHeight() const { return m_nv12YBufRows; }
+    int pixelAspectNum() const { return m_pixelAspectNum; }
+    int pixelAspectDen() const { return m_pixelAspectDen; }
+
+    // If presentation duration was still unknown at open(), may probe the stream once (expensive).
+    // Skipped for .mp4/.m4v/.mov (moov parse already ran). Call from the main thread after first frames.
+    // Returns true if the reader was rewound to t=0 (caller should resync, e.g. syncVideoDecodersToCompositionT).
     bool lazyProbePresentationDuration();
 
 private:
@@ -57,12 +68,20 @@ private:
     int m_pixelAspectDen = 1;
     int m_strideBytes = 0;
     double m_durationSec = 0.0;
+    bool m_durationReliable = false;
     double m_positionSec = 0.0;
     double m_frameDurationSec = 1.0 / 30.0;
     bool m_outputRgb32 = true;
+    bool m_gpuNv12Path = false;
     bool m_lazyDurationProbeDone = false;
+    // When true, lazyProbePresentationDuration does not scan the stream (ISO containers already had
+    // moov parse at open; stream probe is for MKV/WebM and similar).
+    bool m_skipLazyStreamProbe = false;
 
     std::vector<uint8_t> m_rgba;
+    std::vector<uint8_t> m_nv12;
+    int m_nv12YBufRows = 0;
+    int m_nv12DiagLogFrames = 0;
 };
 
 }  // namespace baktsiu

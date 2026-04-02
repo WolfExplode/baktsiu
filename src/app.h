@@ -341,6 +341,9 @@ private:
     std::string mVideoPathR;
     GLuint      mVideoTexture = 0;
     GLuint      mVideoTextureB = 0;
+    GLuint      mVideoTextureUv = 0;
+    GLuint      mVideoTextureUvB = 0;
+    GLuint      mVideoDummyUvTex = 0;
     double      mVideoCompositionT = 0.0;
     double      mVideoStartL = 0.0;
     double      mVideoStartR = 0.0;
@@ -348,6 +351,8 @@ private:
     // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
     // remain in their original slots (mVideoReader/mVideoReaderB).
     bool        mVideoSwapPresentationLR = false;
+    // Video transport: NV12 debug view (0=normal, 1=Y luma, 2=UV plane as RG).
+    int         mVideoNv12DebugMode = 0;
     Shader      mVideoBlitShader;
     bool        mVideoShaderReady = false;
 
