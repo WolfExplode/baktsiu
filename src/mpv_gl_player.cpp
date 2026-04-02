@@ -491,7 +491,7 @@ bool MpvGlPlayer::decodeFrameThrough(double targetSec, int maxReadSamplesCap)
     return true;
 }
 
-bool MpvGlPlayer::decodeFrame()
+bool MpvGlPlayer::decodeFrame(bool fastEventDrain)
 {
     auto* mpv = static_cast<mpv_handle*>(m_mpv);
     if (!mpv) {
@@ -504,7 +504,7 @@ bool MpvGlPlayer::decodeFrame()
     if (mpv_command_string(mpv, "frame-step") < 0) {
         return false;
     }
-    drainEvents(0.05);
+    drainEvents(fastEventDrain ? 0.0 : 0.05);
     refreshTimePos();
     return true;
 }
@@ -660,7 +660,7 @@ bool MpvGlPlayer::decodeFrameThrough(double /*targetSec*/, int /*maxReadSamplesC
     return false;
 }
 
-bool MpvGlPlayer::decodeFrame()
+bool MpvGlPlayer::decodeFrame(bool /*fastEventDrain*/)
 {
     return false;
 }

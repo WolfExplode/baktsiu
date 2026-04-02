@@ -146,6 +146,22 @@ bool Splitter(bool split_vertically, float thickness, float* size1, float* size2
     return SplitterBehavior(bb, id, split_vertically ? ImGuiAxis_X : ImGuiAxis_Y, size1, size2, min_size1, min_size2, 0.0f);
 }
 
+#if defined(USE_VIDEO)
+// Declared early for onKeyPressed; same logic as the helper next to other video utilities below.
+double comparePlaybackFrameStepSec(const baktsiu::MpvGlPlayer* l, const baktsiu::MpvGlPlayer* r)
+{
+    double a = (l && l->isOpen()) ? l->frameDurationSec() : (1.0 / 30.0);
+    double b = (r && r->isOpen()) ? r->frameDurationSec() : (1.0 / 30.0);
+    if (a < 1e-6 || a > 1.0) {
+        a = 1.0 / 30.0;
+    }
+    if (b < 1e-6 || b > 1.0) {
+        b = 1.0 / 30.0;
+    }
+    return (std::min)(a, b);
+}
+#endif
+
 }  // namespace anonymous
 
 namespace ImGui 
@@ -889,6 +905,10 @@ void    App::onKeyPressed(const ImGuiIO& io)
         if (mVideoMode && mVideoReader && mVideoReader->isOpen() && !io.WantTextInput) {
             mVideoPlaying ^= true;
             mVideoPlaybackTimeBank = 0.0;
+            if (mVideoPlaying && videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()) {
+                mVideoCompareSyncAccumulator =
+                    comparePlaybackFrameStepSec(mVideoReader.get(), mVideoReaderB.get());
+            }
         }
 #endif
     } else if (ImGui::IsKeyPressed(0x51)) { // q
@@ -2866,6 +2886,8 @@ void App::resetVideoDecoderSyncCache()
     mVideoLastSyncedTargetMediaL = -1.0;
     mVideoLastSyncedTargetMediaR = -1.0;
     mVideoLastScrubDecodeTime = -1.0e9;
+    // Next compare play tick will sync immediately (accumulator + dt crosses frame step).
+    mVideoCompareSyncAccumulator = 1.0 / 30.0;
 }
 
 void App::stepVideoScrubFiveSeconds(int direction)
@@ -3435,9 +3457,16 @@ void App::tickAndUploadVideoFrame(float deltaTime)
         if (mVideoCompositionT >= tMax - kEndEps) {
             mVideoCompositionT = tMax;
             mVideoPlaying = false;
+            mVideoCompareSyncAccumulator = 0.0;
         }
         clampVideoCompositionT();
-        syncVideoDecodersToCompositionT();
+        const double frameStep =
+            comparePlaybackFrameStepSec(mVideoReader.get(), mVideoReaderB.get());
+        mVideoCompareSyncAccumulator += dt;
+        if (mVideoCompareSyncAccumulator >= frameStep) {
+            mVideoCompareSyncAccumulator -= frameStep;
+            syncVideoDecodersToCompositionT();
+        }
         return;
     }
     double frameDur = mVideoReader->frameDurationSec();
@@ -3446,20 +3475,24 @@ void App::tickAndUploadVideoFrame(float deltaTime)
     }
     const double dt = (std::min)(static_cast<double>(deltaTime), kVideoPlaybackWallDtCapSec);
     mVideoPlaybackTimeBank += dt;
-    // Avoid unbounded bank if UI tick rate is slower than video frame rate.
-    const double bankCap = (std::max)(4.0 * frameDur, kVideoPlaybackWallDtCapSec);
-    if (mVideoPlaybackTimeBank > bankCap) {
-        mVideoPlaybackTimeBank = bankCap;
+    // Never cap the bank: capping drops real elapsed time and playback lags wall clock (cannot catch up).
+    // How many whole video frames the accumulated bank can pay for (fixes FP remainder vs while-loop).
+    constexpr int kMaxDecodeStepsPerFrame = 64;
+    const double framesOwed = mVideoPlaybackTimeBank / frameDur;
+    int n = static_cast<int>(std::floor(framesOwed + 1e-9));
+    if (n > kMaxDecodeStepsPerFrame) {
+        n = kMaxDecodeStepsPerFrame;
     }
-    // One decode per UI frame max: after a stall, catch-up spreads across frames instead of freezing input.
-    if (mVideoPlaybackTimeBank >= frameDur) {
-        mVideoPlaybackTimeBank -= frameDur;
-        if (!mVideoReader->decodeFrame()) {
-            mVideoPlaybackTimeBank = 0.0;
-            mVideoPlaying = false;
-        } else {
-            uploadVideoTexture();
+    if (n > 0) {
+        mVideoPlaybackTimeBank -= static_cast<double>(n) * frameDur;
+        for (int i = 0; i < n; ++i) {
+            if (!mVideoReader->decodeFrame(true)) {
+                mVideoPlaybackTimeBank = 0.0;
+                mVideoPlaying = false;
+                break;
+            }
         }
+        uploadVideoTexture();
     }
 #endif
 }
@@ -3557,6 +3590,10 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     if (ImGui::Button(mVideoPlaying ? "Pause" : "Play")) {
         mVideoPlaying ^= true;
         mVideoPlaybackTimeBank = 0.0;
+        if (mVideoPlaying && cmp && mVideoReaderB && mVideoReaderB->isOpen()) {
+            mVideoCompareSyncAccumulator =
+                comparePlaybackFrameStepSec(mVideoReader.get(), mVideoReaderB.get());
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Close")) {

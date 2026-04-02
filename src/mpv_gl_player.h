@@ -38,7 +38,8 @@ public:
 
     // Records flush preference for the next decodeFrameThrough (Media Foundation used seek+decode in two steps).
     void seek(double seconds, bool flushStreams = true);
-    bool decodeFrame();
+    // fastEventDrain: playback should use true (short mpv_wait_event) so batch frame-steps stay near wall clock.
+    bool decodeFrame(bool fastEventDrain = false);
     bool decodeFrameThrough(double targetSec, int maxReadSamplesCap = 0);
 
     void renderToTexture(GLuint texture);

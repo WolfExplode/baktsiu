@@ -334,6 +334,8 @@ private:
     // Defer lazy duration probe so the first paint after open is not blocked by a full-stream read.
     int         mVideoLazyDurationGraceFrames = 0;
     double      mVideoPlaybackTimeBank = 0.0;
+    // Compare play: wall-time accumulator; syncVideoDecodersToCompositionT runs when this reaches a frame step.
+    double      mVideoCompareSyncAccumulator = 0.0;
     double      mVideoScrubValue = 0.0;
     std::unique_ptr<MpvGlPlayer> mVideoReader;
     std::unique_ptr<MpvGlPlayer> mVideoReaderB;
