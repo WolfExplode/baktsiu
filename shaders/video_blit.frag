@@ -21,6 +21,15 @@ uniform bool uApplyToneMapping;
 // Same bits as present.frag: 0x1 difference, 0x2 heatmap, 0x4 overflow, 0x8 underflow.
 uniform int uPixelMarkerFlags;
 
+// Zoom/pan (same convention as present.frag: wh = round(vUV * uWindowSize)).
+uniform vec4 uVideoCanvasRect;
+uniform vec2 uVideoRefSize;
+uniform vec2 uVideoOffset;
+uniform vec2 uVideoOffsetExtra;
+uniform vec2 uVideoRelativeOffset;
+uniform float uVideoImageScale;
+uniform int uVideoSideBySide;
+
 in vec2 vUV;
 out vec4 oColor;
 
@@ -302,23 +311,6 @@ vec4 overlayAp1PixelMarker(vec4 color, int markerFlags)
     return color;
 }
 
-bool videoContainFetchEnc(sampler2D tex, vec2 localBL, vec2 panelPx, vec2 vidSize, out vec3 encRgb)
-{
-    float vw = max(vidSize.x, 1.0);
-    float vh = max(vidSize.y, 1.0);
-    float pw = max(panelPx.x, 1.0);
-    float ph = max(panelPx.y, 1.0);
-    float s = min(pw / vw, ph / vh);
-    vec2 disp = vec2(vw * s / pw, vh * s / ph);
-    vec2 off = (vec2(1.0) - disp) * 0.5;
-    vec2 vidUv = (localBL - off) / max(disp, vec2(1e-5));
-    if (vidUv.x < 0.0 || vidUv.x > 1.0 || vidUv.y < 0.0 || vidUv.y > 1.0) {
-        return false;
-    }
-    encRgb = texture(tex, vec2(vidUv.x, 1.0 - vidUv.y)).rgb;
-    return true;
-}
-
 // Markers after colorTransform (AP1). encRgb is raw mpv FBO (non-linear, ~BT.709/sRGB-ish, 8-bit).
 // AP1-only tests match present.frag but rarely fire on SDR 8-bit; add encoded clip checks for video.
 vec4 overlayVideoPixelMarker(vec4 ap1Color, vec3 encRgb, int markerFlags)
@@ -346,104 +338,143 @@ vec3 mapVideoToDisplay(vec3 encRgb)
     return outputTransform(c.rgb, uOutTransformType, uDisplayGamma);
 }
 
-// localBL: [0,1]^2 with (0,0) bottom-left, (1,1) top-right of the panel.
-vec4 sampleContain(sampler2D tex, vec2 localBL, vec2 panelPx, vec2 vidSize)
+bool uvInsideImage(vec2 uv)
 {
-    float vw = max(vidSize.x, 1.0);
-    float vh = max(vidSize.y, 1.0);
-    float pw = max(panelPx.x, 1.0);
-    float ph = max(panelPx.y, 1.0);
-    float s = min(pw / vw, ph / vh);
-    vec2 disp = vec2(vw * s / pw, vh * s / ph);
-    vec2 off = (vec2(1.0) - disp) * 0.5;
-    vec2 vidUv = (localBL - off) / max(disp, vec2(1e-5));
-    if (vidUv.x < 0.0 || vidUv.x > 1.0 || vidUv.y < 0.0 || vidUv.y > 1.0) {
+    const vec2 eps = vec2(1e-4);
+    return all(greaterThanEqual(uv, -eps)) && all(lessThanEqual(uv, vec2(1.0) + eps));
+}
+
+vec2 refContainDisp(vec2 refWH, vec2 texWH)
+{
+    vec2 safeR = max(refWH, vec2(1.0));
+    vec2 safeT = max(texWH, vec2(1.0));
+    float sc = min(safeR.x / safeT.x, safeR.y / safeT.y);
+    return safeT * sc;
+}
+
+vec2 refPxToUvContain(vec2 refPx, vec2 refWH, vec2 texWH)
+{
+    vec2 disp = refContainDisp(refWH, texWH);
+    vec2 ox = (max(refWH, vec2(1.0)) - disp) * 0.5;
+    return (refPx - ox) / max(disp, vec2(1e-6));
+}
+
+vec4 sampleVideoZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, vec2 refSz, vec2 texSz)
+{
+    vec2 refPx = (wh - offset) / max(imageScale, 1e-5);
+    vec2 uv = refPxToUvContain(refPx, refSz, texSz);
+    if (!uvInsideImage(uv)) {
         return kLetterbox;
     }
-    vec4 t = texture(tex, vec2(vidUv.x, 1.0 - vidUv.y));
+    vec4 t = texture(tex, vec2(uv.x, 1.0 - uv.y));
     t.rgb = mapVideoToDisplay(t.rgb);
     return t;
 }
 
-vec2 screenPxFromVUV(vec2 vUVin)
+bool videoFetchEncZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, vec2 refSz, vec2 texSz, out vec3 encRgb)
 {
-    return vec2(vUVin.x * uWindowSize.x, (1.0 - vUVin.y) * uWindowSize.y);
+    vec2 refPx = (wh - offset) / max(imageScale, 1e-5);
+    vec2 uv = refPxToUvContain(refPx, refSz, texSz);
+    if (!uvInsideImage(uv)) {
+        return false;
+    }
+    encRgb = texture(tex, vec2(uv.x, 1.0 - uv.y)).rgb;
+    return true;
 }
 
 void main()
 {
-    vec2 sp = screenPxFromVUV(vUV);
-    if (sp.x < uContentOrigin.x || sp.y < uContentOrigin.y
-        || sp.x >= uContentOrigin.x + uContentSize.x || sp.y >= uContentOrigin.y + uContentSize.y) {
+    vec2 wh = round(vUV * uWindowSize + vec2(0.5)) - vec2(0.5);
+    if (!all(greaterThanEqual(wh, uVideoCanvasRect.xy)) || !all(lessThanEqual(wh, uVideoCanvasRect.zw))) {
         oColor = kLetterbox;
         return;
     }
-
-    vec2 local = (sp - uContentOrigin) / max(uContentSize, vec2(1.0));
-    local.y = 1.0 - local.y;
 
     bool inDiffMode = (uPixelMarkerFlags & 0x3) != 0;
     bool enableHeatMap = ((uPixelMarkerFlags & 0x2) >> 1) != 0;
     vec3 checkerBg = getCheckerColor(vUV, uWindowSize);
 
     if (uCompareMode == 0) {
-        oColor = sampleContain(uVideo, local, uContentSize, uVideoSize);
+        oColor = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize);
         return;
     }
 
     float spx = clamp(uSplitPos, 0.02, 0.98);
     float lineW = 1.0 / max(uContentSize.x, 1.0);
     bool showSplitter = uSplitPos != 1.0 && (uPixelMarkerFlags & 0x3) == 0;
+    vec2 sp = vec2(vUV.x * uWindowSize.x, (1.0 - vUV.y) * uWindowSize.y);
+    vec2 local = (sp - uContentOrigin) / max(uContentSize, vec2(1.0));
+    local.y = 1.0 - local.y;
     bool onSplit = abs(local.x - spx) < lineW * 0.5;
 
-    // Side-by-side: each stream letterboxed in its column (split position = column boundary).
+    // Side-by-side: per-column view transforms (uVideoSideBySide != 0).
     if (uCompareMode == 2) {
-        float wr = max(1.0 - spx, 1e-5);
-        vec2 panelL = vec2(uContentSize.x * spx, uContentSize.y);
-        vec2 panelR = vec2(uContentSize.x * wr, uContentSize.y);
-
-        if (inDiffMode) {
-            vec3 encL, encR;
-            bool okL;
-            bool okR;
-            if (local.x < spx) {
-                vec2 norm = vec2(local.x / max(spx, 1e-5), local.y);
-                okL = videoContainFetchEnc(uVideo, norm, panelL, uVideoSize, encL);
-                okR = videoContainFetchEnc(uVideoR, norm, panelR, uVideoSizeR, encR);
+        if (uVideoSideBySide != 0) {
+            if (inDiffMode) {
+                vec3 encL;
+                vec3 encR;
+                bool okL;
+                bool okR;
+                float splitPx = uSplitPos * uWindowSize.x;
+                if (wh.x < splitPx) {
+                    vec2 refPx = (wh - uVideoOffset) / max(uVideoImageScale, 1e-5);
+                    vec2 uvL = refPxToUvContain(refPx, uVideoRefSize, uVideoSize);
+                    vec2 dispR = refContainDisp(uVideoRefSize, uVideoSizeR);
+                    vec2 deltaUV2 = round(uVideoRelativeOffset) / max(dispR * uVideoImageScale, vec2(1e-6));
+                    vec2 uvR = refPxToUvContain(refPx, uVideoRefSize, uVideoSizeR) - deltaUV2;
+                    okL = uvInsideImage(uvL);
+                    okR = uvInsideImage(uvR);
+                    if (okL) {
+                        encL = texture(uVideo, vec2(uvL.x, 1.0 - uvL.y)).rgb;
+                    }
+                    if (okR) {
+                        encR = texture(uVideoR, vec2(uvR.x, 1.0 - uvR.y)).rgb;
+                    }
+                } else {
+                    vec2 whR = wh;
+                    whR.x = round(wh.x - uSplitPos * uWindowSize.x + 0.5) - 0.5;
+                    vec2 refPx = (whR - uVideoOffsetExtra) / max(uVideoImageScale, 1e-5);
+                    vec2 uvR = refPxToUvContain(refPx, uVideoRefSize, uVideoSizeR);
+                    vec2 disp1 = refContainDisp(uVideoRefSize, uVideoSize);
+                    vec2 deltaUV1 = round(uVideoRelativeOffset) / max(disp1 * uVideoImageScale, vec2(1e-6));
+                    vec2 uvL = refPxToUvContain(refPx, uVideoRefSize, uVideoSize) + deltaUV1;
+                    okL = uvInsideImage(uvL);
+                    okR = uvInsideImage(uvR);
+                    if (okL) {
+                        encL = texture(uVideo, vec2(uvL.x, 1.0 - uvL.y)).rgb;
+                    }
+                    if (okR) {
+                        encR = texture(uVideoR, vec2(uvR.x, 1.0 - uvR.y)).rgb;
+                    }
+                }
+                if (!okL || !okR) {
+                    oColor = vec4(checkerBg, 1.0);
+                } else {
+                    vec3 ap1L = videoRgbToAp1(encL) * pow(2.0, uEV);
+                    vec3 ap1R = videoRgbToAp1(encR) * pow(2.0, uEV);
+                    float squareError = getColorDistance(ap1L, ap1R);
+                    bool leftSide = wh.x < splitPx;
+                    vec3 baseRaw = mix(ap1R, ap1L, float(leftSide));
+                    vec3 rgb = mix(baseRaw, vec3(1.0, 0.0, 1.0), clamp(squareError, 0.0, 1.0));
+                    rgb = mix(rgb, getHeatColor(squareError), vec3(enableHeatMap));
+                    oColor = overlayAp1PixelMarker(vec4(rgb, 1.0), uPixelMarkerFlags);
+                    oColor.rgb = outputTransform(oColor.rgb, uOutTransformType, mix(uDisplayGamma, 1.0, enableHeatMap));
+                }
             } else {
-                vec2 norm = vec2((local.x - spx) / wr, local.y);
-                okL = videoContainFetchEnc(uVideo, norm, panelL, uVideoSize, encL);
-                okR = videoContainFetchEnc(uVideoR, norm, panelR, uVideoSizeR, encR);
+                vec4 cL = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize);
+                vec2 whR = wh;
+                whR.x = round(wh.x - uSplitPos * uWindowSize.x + 0.5) - 0.5;
+                vec4 cR = sampleVideoZoomed(uVideoR, whR, uVideoOffsetExtra, uVideoImageScale, uVideoRefSize, uVideoSizeR);
+                oColor = vUV.x < uSplitPos ? cL : cR;
             }
-            if (!okL || !okR) {
-                oColor = vec4(checkerBg, 1.0);
-            } else {
-                vec3 ap1L = videoRgbToAp1(encL) * pow(2.0, uEV);
-                vec3 ap1R = videoRgbToAp1(encR) * pow(2.0, uEV);
-                float squareError = getColorDistance(ap1L, ap1R);
-                bool leftSide = local.x < spx;
-                vec3 baseRaw = mix(ap1R, ap1L, float(leftSide));
-                vec3 rgb = mix(baseRaw, vec3(1.0, 0.0, 1.0), clamp(squareError, 0.0, 1.0));
-                rgb = mix(rgb, getHeatColor(squareError), vec3(enableHeatMap));
-                oColor = overlayAp1PixelMarker(vec4(rgb, 1.0), uPixelMarkerFlags);
-                oColor.rgb = outputTransform(oColor.rgb, uOutTransformType, mix(uDisplayGamma, 1.0, enableHeatMap));
+            if (onSplit) {
+                oColor = vec4(1.0, 1.0, 1.0, 1.0);
             }
-        } else {
-            if (local.x < spx) {
-                vec2 localL = vec2(local.x / max(spx, 1e-5), local.y);
-                oColor = sampleContain(uVideo, localL, panelL, uVideoSize);
-            } else {
-                vec2 localR = vec2((local.x - spx) / wr, local.y);
-                oColor = sampleContain(uVideoR, localR, panelR, uVideoSizeR);
-            }
+            return;
         }
-        if (onSplit) {
-            oColor = vec4(1.0, 1.0, 1.0, 1.0);
-        }
-        return;
     }
 
-    // uCompareMode == 1: vertical wipe / split line
+    // uCompareMode == 1 (or SBS fallback): shared ref-pixel mapping
     if (inDiffMode) {
         if (onSplit && showSplitter) {
             oColor = vec4(1.0, 1.0, 1.0, 1.0);
@@ -451,8 +482,8 @@ void main()
         }
         vec3 encL;
         vec3 encR;
-        bool okL = videoContainFetchEnc(uVideo, local, uContentSize, uVideoSize, encL);
-        bool okR = videoContainFetchEnc(uVideoR, local, uContentSize, uVideoSizeR, encR);
+        bool okL = videoFetchEncZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize, encL);
+        bool okR = videoFetchEncZoomed(uVideoR, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSizeR, encR);
         if (!okL || !okR) {
             oColor = vec4(checkerBg, 1.0);
             return;
@@ -474,7 +505,7 @@ void main()
         return;
     }
 
-    vec4 cL = sampleContain(uVideo, local, uContentSize, uVideoSize);
-    vec4 cR = sampleContain(uVideoR, local, uContentSize, uVideoSizeR);
-    oColor = local.x < spx ? cL : cR;
+    vec4 cLa = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize);
+    vec4 cRa = sampleVideoZoomed(uVideoR, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSizeR);
+    oColor = local.x < spx ? cLa : cRa;
 }

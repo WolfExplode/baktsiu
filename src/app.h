@@ -254,6 +254,11 @@ private:
     void    getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const;
     bool    getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const;
     bool    getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const;
+
+    void    syncVideoViewsLayout(const ImGuiIO& io);
+    void    updateVideoViewTransform(const ImGuiIO& io);
+    void    resetVideoViewTransform(bool fitWindow = false);
+    Vec2f   videoRefDisplaySizeForLayout() const;
 #endif
 
     void    recomputeVideoScrubBounds(double& outMin, double& outMax) const;
@@ -313,6 +318,13 @@ private:
     // Image transformation
     View        mView;
     View        mColumnViews[2];    // Views for side by side mode.
+#if defined(USE_VIDEO)
+    View        mVideoView;
+    View        mVideoColumnViews[2];
+    float       mVideoPrevScale = -1.0f;
+    // Fit reset must run after syncVideoViewsLayout() so bottom padding includes the transport bar.
+    bool        mVideoPendingViewFitReset = false;
+#endif
     float       mImageScale = 1.0f;
     float       mPrevImageScale = -1.0f;
 

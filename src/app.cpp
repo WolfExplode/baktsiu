@@ -20,11 +20,13 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 #include <fx/gltf.h>
@@ -49,6 +51,10 @@ shader.initFromFiles(name, "shaders/"##STRING(vtxName)##".vert", "shaders/"##STR
 
 #ifndef _MSC_VER
 #define sprintf_s snprintf
+#endif
+
+#ifndef _WIN32
+#include <sys/stat.h>
 #endif
 
 namespace
@@ -281,6 +287,70 @@ void formatVideoHms(double secIn, char* out, size_t outSize)
     std::snprintf(out, outSize, "%lld:%02lld:%02lld", h, m, s);
 }
 
+std::int64_t fileSizeBytesUtf8(const std::string& path)
+{
+    if (path.empty()) {
+        return -1;
+    }
+#ifdef _WIN32
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) {
+        return -1;
+    }
+    std::wstring wpath(static_cast<size_t>(wlen), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wpath[0], wlen) <= 0) {
+        return -1;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad {};
+    if (!GetFileAttributesExW(wpath.c_str(), GetFileExInfoStandard, &fad)) {
+        return -1;
+    }
+    ULARGE_INTEGER uli;
+    uli.LowPart = fad.nFileSizeLow;
+    uli.HighPart = fad.nFileSizeHigh;
+    return static_cast<std::int64_t>(uli.QuadPart);
+#else
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        return -1;
+    }
+    return static_cast<std::int64_t>(st.st_size);
+#endif
+}
+
+void formatFileSizeHuman(std::int64_t bytes, char* out, size_t outSize)
+{
+    if (outSize == 0) {
+        return;
+    }
+    if (bytes < 0) {
+        std::snprintf(out, outSize, "?");
+        return;
+    }
+    if (bytes < 1024) {
+        std::snprintf(out, outSize, "%lld B", static_cast<long long>(bytes));
+        return;
+    }
+    static const char* const suf[] = {"KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(bytes);
+    int i = -1;
+    do {
+        v /= 1024.0;
+        ++i;
+    } while (v >= 1024.0 && i < 3);
+    std::snprintf(out, outSize, "%.2f %s", v, suf[i]);
+}
+
+void footerFileSizeHuman(
+    const std::string& path, std::string& cachePath, std::int64_t& cacheBytes, char* out, size_t outSize)
+{
+    if (path != cachePath) {
+        cachePath = path;
+        cacheBytes = fileSizeBytesUtf8(path);
+    }
+    formatFileSizeHuman(cacheBytes, out, outSize);
+}
+
 }  // namespace
 
 namespace baktsiu
@@ -456,6 +526,11 @@ bool App::initialize(const char* title, int width, int height)
     mView.setViewportPadding(padding);
     mColumnViews[0].setViewportPadding(padding);
     mColumnViews[1].setViewportPadding(padding);
+#if defined(USE_VIDEO)
+    mVideoView.setViewportPadding(padding);
+    mVideoColumnViews[0].setViewportPadding(padding);
+    mVideoColumnViews[1].setViewportPadding(padding);
+#endif
 
     // Fonts are converted into data arrays in pre-built stage. It uses bin2c.cmake to convert
     // resources/fonts/*.ttf into corresponding data arrays. Here we simply add fonts from 
@@ -723,6 +798,14 @@ void App::run(CompositeFlags initFlags)
             if (mVideoLazyDurationGraceFrames > 0) {
                 --mVideoLazyDurationGraceFrames;
             }
+            syncVideoViewsLayout(io);
+            if (mVideoPendingViewFitReset) {
+                resetVideoViewTransform(true);
+                mVideoPendingViewFitReset = false;
+            }
+            updateVideoViewTransform(io);
+            const bool vSbs = videoCompareActive() && mCompositeFlags == CompositeFlags::SideBySide;
+            mImageScale = vSbs ? mVideoColumnViews[0].getImageScale() : mVideoView.getImageScale();
             tickAndUploadVideoFrame(io.DeltaTime);
             initVideoTransportBar(io);
             if (mShowImageNameOverlay) {
@@ -1032,6 +1115,11 @@ void    App::syncSideBySideView(const ImGuiIO& io)
 {
     int columnIdx = static_cast<int>(io.MousePos.x > io.DisplaySize.x * mViewSplitPos);
     mColumnViews[columnIdx].setLocalOffset(mColumnViews[columnIdx ^ 1].getLocalOffset());
+#if defined(USE_VIDEO)
+    if (mVideoMode && videoCompareActive() && mCompositeFlags == CompositeFlags::SideBySide) {
+        mVideoColumnViews[columnIdx].setLocalOffset(mVideoColumnViews[columnIdx ^ 1].getLocalOffset());
+    }
+#endif
 }
 
 void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
@@ -1190,6 +1278,155 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
         mColumnViews[theOtherColumnIdx].scale(relativeScale, &theOtherScalePivot);
     }
 }
+
+#if defined(USE_VIDEO)
+void App::updateVideoViewTransform(const ImGuiIO& io)
+{
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+
+    Vec2f scalePivot(-1.0f);
+    bool mouseAtRightColumn = false;
+    auto fetchScalePivot = [](const ImGuiIO& io, bool useColumnView, float viewSplitPos, bool& mouseAtRightColumn) {
+        mouseAtRightColumn = false;
+        Vec2f scalePivot(io.MousePos.x, io.DisplaySize.y - io.MousePos.y);
+        if (useColumnView) {
+            const float leftColumnWidth = io.DisplaySize.x * viewSplitPos;
+            if (scalePivot.x > leftColumnWidth) {
+                scalePivot.x -= leftColumnWidth;
+                mouseAtRightColumn = true;
+            }
+        }
+
+        scalePivot = glm::round(scalePivot + Vec2f(0.5f)) - Vec2f(0.5f);
+        return scalePivot;
+    };
+
+    const bool useColumnView = videoCompareActive() && mCompositeFlags == CompositeFlags::SideBySide;
+    mImageScale = useColumnView ? mVideoColumnViews[0].getImageScale() : mVideoView.getImageScale();
+
+    const bool videoMouseActive = glfwGetWindowAttrib(mWindow, GLFW_FOCUSED) && !io.WantCaptureMouse;
+    float oldImageScale = mImageScale;
+
+    static bool isVideoSniperMode = false;
+
+    if (isVideoSniperMode && ImGui::IsKeyReleased(0x5A)) {
+        mImageScale = mVideoPrevScale;
+        mVideoPrevScale = -1.0f;
+        isVideoSniperMode = false;
+    }
+
+    const bool splitForVideoCompare = mVideoMode && videoCompareActive() && mCompositeFlags != CompositeFlags::Top;
+
+    if (videoMouseActive) {
+        const bool doingCtrlMmbZoom = !mIsMovingSplitter && ImGui::IsMouseDown(2) && io.KeyCtrl;
+        if (!doingCtrlMmbZoom) {
+            mCtrlMmbZoomPivotLocked = false;
+        }
+
+        if (ImGui::IsMouseReleased(0) || ImGui::IsMouseReleased(1) || ImGui::IsMouseReleased(2)) {
+            mIsScalingImage = false;
+        }
+
+        if (!shouldShowSplitter() && !splitForVideoCompare && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
+            mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
+            mIsScalingImage = true;
+        } else if (!mIsMovingSplitter && ImGui::IsMouseDown(2)) {
+            if (io.KeyCtrl) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                if (!mCtrlMmbZoomPivotLocked) {
+                    bool atRightCol = false;
+                    mCtrlMmbZoomPivot = fetchScalePivot(io, useColumnView, mViewSplitPos, atRightCol);
+                    mCtrlMmbZoomRightColumn = atRightCol;
+                    mCtrlMmbZoomPivotLocked = true;
+                }
+                scalePivot = mCtrlMmbZoomPivot;
+                mouseAtRightColumn = mCtrlMmbZoomRightColumn;
+                static constexpr float kMmbZoomSensitivity = 0.003f;
+                const float zoomDrag = (io.MouseDelta.x - io.MouseDelta.y) * kMmbZoomSensitivity;
+                mImageScale *= glm::clamp(1.0f + zoomDrag, 0.25f, 4.0f);
+                mIsScalingImage = true;
+            } else {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+                Vec2f translate(io.MouseDelta.x, -io.MouseDelta.y);
+
+                if (!useColumnView) {
+                    mVideoView.translate(translate);
+                } else if (io.KeyAlt) {
+                    static Vec2f residualTranslate = Vec2f(0.0f);
+                    translate += residualTranslate;
+
+                    Vec2f roundedTranslate = glm::round(translate / mImageScale);
+                    int columnIdx = static_cast<int>(io.MousePos.x > io.DisplaySize.x * mViewSplitPos);
+                    mVideoColumnViews[columnIdx].translate(roundedTranslate, true);
+                    residualTranslate = translate - roundedTranslate * mImageScale;
+                } else {
+                    mVideoColumnViews[0].translate(translate);
+                    mVideoColumnViews[1].translate(translate);
+                }
+
+                return;
+            }
+        }
+    }
+
+    static constexpr float kScrollZoomFactor = 1.12f;
+    if (videoMouseActive && io.MouseWheel != 0.0f) {
+        scalePivot = fetchScalePivot(io, useColumnView, mViewSplitPos, mouseAtRightColumn);
+
+        if (io.MouseWheel > 0.0f) {
+            mImageScale *= kScrollZoomFactor;
+        } else {
+            mImageScale /= kScrollZoomFactor;
+        }
+    }
+
+    if (ImGui::IsKeyPressed(0x14D) || ImGui::IsKeyPressed(0x2D)) {
+        mImageScale *= 0.5f;
+    } else if (ImGui::IsKeyPressed(0x14E) || ImGui::IsKeyPressed(0x3D)) {
+        mImageScale *= 2.0f;
+    } else if (!io.KeyCtrl && ImGui::IsKeyPressed(0x5A) && mVideoPrevScale < 0.0f) {
+        isVideoSniperMode = true;
+        scalePivot = fetchScalePivot(io, useColumnView, mViewSplitPos, mouseAtRightColumn);
+        mVideoPrevScale = mImageScale;
+        mImageScale = 72.0f;
+    } else if (io.KeyShift && ImGui::IsKeyPressed(0x046)) {
+        resetVideoViewTransform(true);
+        mImageScale = useColumnView ? mVideoColumnViews[0].getImageScale() : mVideoView.getImageScale();
+        return;
+    } else if (ImGui::IsKeyPressed(0x14B) || ImGui::IsKeyPressed(0x2F) || ImGui::IsKeyPressed(0x046)) {
+        resetVideoViewTransform(true);
+        mImageScale = useColumnView ? mVideoColumnViews[0].getImageScale() : mVideoView.getImageScale();
+        return;
+    }
+
+    mImageScale = glm::clamp(mImageScale, 0.125f, 256.0f);
+    const float relativeScale = mImageScale / oldImageScale;
+    if (abs(relativeScale - 1.0f) < 1e-4f) {
+        return;
+    }
+
+    if (!useColumnView) {
+        mVideoView.scale(relativeScale, scalePivot.x > 0.0f ? &scalePivot : nullptr);
+    } else if (scalePivot.x < 0.0f) {
+        mVideoColumnViews[0].scale(relativeScale);
+        mVideoColumnViews[1].scale(relativeScale);
+    } else {
+        const int focusColumnIdx = mouseAtRightColumn ? 1 : 0;
+        mVideoColumnViews[focusColumnIdx].scale(relativeScale, &scalePivot);
+        scalePivot = mVideoColumnViews[focusColumnIdx].getImageScalePivot();
+
+        Vec2f pixelCoords = mVideoColumnViews[focusColumnIdx].getImageCoords(scalePivot);
+        const int theOtherColumnIdx = focusColumnIdx ^ 1;
+        Vec2f theOtherScalePivot = mVideoColumnViews[theOtherColumnIdx].getViewportCoords(pixelCoords);
+
+        theOtherScalePivot.y = scalePivot.y;
+        mVideoColumnViews[theOtherColumnIdx].scale(relativeScale, &theOtherScalePivot);
+    }
+}
+#endif  // USE_VIDEO
 
 void App::updateImagePairFromPressedKeys()
 {
@@ -1950,30 +2187,44 @@ void App::initFooter()
             const Vec2f leftSz(leftP->displayWidthForAspect(), leftP->displayHeightForAspect());
             const Vec2f rightSz(rightP->displayWidthForAspect(), rightP->displayHeightForAspect());
 
+            const std::string& pathLeft = dispSwap ? mVideoPathR : mVideoPathL;
+            const std::string& pathRight = dispSwap ? mVideoPathL : mVideoPathR;
+            static std::string cachePathVL, cachePathVR;
+            static std::int64_t cacheBytesVL = -1;
+            static std::int64_t cacheBytesVR = -1;
+            char szLeft[40];
+            char szRight[40];
+            footerFileSizeHuman(pathLeft, cachePathVL, cacheBytesVL, szLeft, sizeof szLeft);
+            footerFileSizeHuman(pathRight, cachePathVR, cacheBytesVR, szRight, sizeof szRight);
+
             ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
-            ImGui::Text("L | %.0f x %.0f", leftSz.x, leftSz.y);
+            ImGui::Text("%.0f x %.0f · %s", leftSz.x, leftSz.y, szLeft);
             Vec2f lcoords;
             if (getCompareSideVideoPixelAtMouse(g.IO, 0, lcoords)) {
                 ImGui::SameLine();
                 ImGui::Text("(%.0f, %.0f)", lcoords.x, leftSz.y - lcoords.y - 1.0f);
             }
 
-            char rbuf[128];
+            char rbuf[192];
             Vec2f rcoords;
             if (getCompareSideVideoPixelAtMouse(g.IO, 1, rcoords)) {
-                sprintf_s(rbuf, "R | %.0f x %.0f (%.0f, %.0f)", rightSz.x, rightSz.y, rcoords.x,
-                    rightSz.y - rcoords.y - 1.0f);
+                sprintf_s(rbuf, sizeof rbuf, "(%.0f, %.0f) · %.0f x %.0f · %s", rcoords.x,
+                    rightSz.y - rcoords.y - 1.0f, rightSz.x, rightSz.y, szRight);
             } else {
-                sprintf_s(rbuf, "R | %.0f x %.0f", rightSz.x, rightSz.y);
+                sprintf_s(rbuf, sizeof rbuf, "%.0f x %.0f · %s", rightSz.x, rightSz.y, szRight);
             }
             const float rtextW = ImGui::CalcTextSize(rbuf).x;
             ImGui::SameLine();
             ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - rtextW);
             ImGui::TextUnformatted(rbuf);
         } else {
+            static std::string cachePathVSingle;
+            static std::int64_t cacheBytesVSingle = -1;
+            char szV[40];
+            footerFileSizeHuman(mVideoPathL, cachePathVSingle, cacheBytesVSingle, szV, sizeof szV);
             const Vec2f imageSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
             ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
-            ImGui::Text("| %.0f x %.0f", imageSize.x, imageSize.y);
+            ImGui::Text("%.0f x %.0f · %s", imageSize.x, imageSize.y, szV);
             Vec2f imageCoords;
             if (getSingleVideoPixelAtMouse(g.IO, imageCoords)) {
                 ImGui::SameLine();
@@ -1992,20 +2243,31 @@ void App::initFooter()
         const Vec2f leftSz = leftIm->size();
         const Vec2f rightSz = rightIm->size();
 
+        const std::string& pathLeft = leftIm->filepath();
+        const std::string& pathRight = rightIm->filepath();
+        static std::string cachePathIL, cachePathIR;
+        static std::int64_t cacheBytesIL = -1;
+        static std::int64_t cacheBytesIR = -1;
+        char szLeft[40];
+        char szRight[40];
+        footerFileSizeHuman(pathLeft, cachePathIL, cacheBytesIL, szLeft, sizeof szLeft);
+        footerFileSizeHuman(pathRight, cachePathIR, cacheBytesIR, szRight, sizeof szRight);
+
         ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
-        ImGui::Text("L | %.0f x %.0f", leftSz.x, leftSz.y);
+        ImGui::Text("%.0f x %.0f · %s", leftSz.x, leftSz.y, szLeft);
         Vec2f lcoords;
         if (getCompareSideImagePixelAtMouse(Vec2f(g.IO.MousePos.x, g.IO.MousePos.y), 0, lcoords)) {
             ImGui::SameLine();
             ImGui::Text("(%.0f, %.0f)", lcoords.x, leftSz.y - lcoords.y - 1.0f);
         }
 
-        char rbuf[128];
+        char rbuf[192];
         Vec2f rcoords;
         if (getCompareSideImagePixelAtMouse(Vec2f(g.IO.MousePos.x, g.IO.MousePos.y), 1, rcoords)) {
-            sprintf_s(rbuf, "R | %.0f x %.0f (%.0f, %.0f)", rightSz.x, rightSz.y, rcoords.x, rightSz.y - rcoords.y - 1.0f);
+            sprintf_s(rbuf, sizeof rbuf, "(%.0f, %.0f) · %.0f x %.0f · %s", rcoords.x,
+                rightSz.y - rcoords.y - 1.0f, rightSz.x, rightSz.y, szRight);
         } else {
-            sprintf_s(rbuf, "R | %.0f x %.0f", rightSz.x, rightSz.y);
+            sprintf_s(rbuf, sizeof rbuf, "%.0f x %.0f · %s", rightSz.x, rightSz.y, szRight);
         }
         const float rtextW = ImGui::CalcTextSize(rbuf).x;
         ImGui::SameLine();
@@ -2014,7 +2276,7 @@ void App::initFooter()
     } else if (mTopImageIndex >= 0) {
         const Vec2f& imageSize = mImageList[mTopImageIndex]->size();
         ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
-        ImGui::Text("| %.0f x %.0f", imageSize.x, imageSize.y);
+        ImGui::Text("%.0f x %.0f", imageSize.x, imageSize.y);
 
         Vec2f imageCoords;
         if (getImageCoordinates(g.IO.MousePos, imageCoords)) {
@@ -2251,8 +2513,8 @@ void App::showVideoProperties()
         const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
         const std::string& leftPath = dispSwap ? mVideoPathR : mVideoPathL;
         const std::string& rightPath = dispSwap ? mVideoPathL : mVideoPathR;
-        drawStream("Left (on screen)", leftP, leftPath);
-        drawStream("Right (on screen)", rightP, rightPath);
+        drawStream("Left", leftP, leftPath);
+        drawStream("Right", rightP, rightPath);
     } else {
         drawStream("Video", mVideoReader.get(), mVideoPathL);
     }
@@ -3189,7 +3451,98 @@ bool videoContainPixelFromLocal(Vec2f localBL, Vec2f panelPx, Vec2f vidSize, Vec
     outPx.y = glm::clamp(outPx.y, 0.f, (std::max)(vh - 1.f, 0.f));
     return true;
 }
+
+// Map reference-frame pixel (View image coords) to texture pixel; matches present.frag refPxToUvContain.
+bool videoPixelFromRefPx(Vec2f refPx, Vec2f refSz, Vec2f texSz, Vec2f& outPx)
+{
+    const Vec2f safeR = glm::max(refSz, Vec2f(1.f));
+    const Vec2f safeT = glm::max(texSz, Vec2f(1.f));
+    const float sc = (std::min)(safeR.x / safeT.x, safeR.y / safeT.y);
+    const Vec2f disp = safeT * sc;
+    const Vec2f ox = (safeR - disp) * 0.5f;
+    const Vec2f uv((refPx.x - ox.x) / (std::max)(disp.x, 1e-5f), (refPx.y - ox.y) / (std::max)(disp.y, 1e-5f));
+    if (uv.x < -1e-4f || uv.x > 1.f + 1e-4f || uv.y < -1e-4f || uv.y > 1.f + 1e-4f) {
+        return false;
+    }
+    outPx.x = std::floor(uv.x * texSz.x);
+    outPx.y = std::floor(uv.y * texSz.y);
+    outPx.x = glm::clamp(outPx.x, 0.f, (std::max)(texSz.x - 1.f, 0.f));
+    outPx.y = glm::clamp(outPx.y, 0.f, (std::max)(texSz.y - 1.f, 0.f));
+    return true;
+}
 }  // namespace
+
+Vec2f App::videoRefDisplaySizeForLayout() const
+{
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return Vec2f(1.0f, 1.0f);
+    }
+    const bool cmp = videoCompareActive();
+    if (!cmp) {
+        return Vec2f(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
+    }
+    if (mCompositeFlags == CompositeFlags::Top) {
+        const bool dispSwap = mVideoSwapPresentationLR;
+        const MpvGlPlayer* shown = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+        if (!shown || !shown->isOpen()) {
+            return Vec2f(1.0f, 1.0f);
+        }
+        return Vec2f(shown->displayWidthForAspect(), shown->displayHeightForAspect());
+    }
+    const bool dispSwap = mVideoSwapPresentationLR;
+    const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+    const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+    Vec2f ref(1.0f, 1.0f);
+    if (leftP && leftP->isOpen()) {
+        ref.x = (std::max)(ref.x, leftP->displayWidthForAspect());
+        ref.y = (std::max)(ref.y, leftP->displayHeightForAspect());
+    }
+    if (rightP && rightP->isOpen()) {
+        ref.x = (std::max)(ref.x, rightP->displayWidthForAspect());
+        ref.y = (std::max)(ref.y, rightP->displayHeightForAspect());
+    }
+    return ref;
+}
+
+void App::resetVideoViewTransform(bool fitWindow)
+{
+    mVideoPrevScale = -1.0f;
+    mVideoView.reset(fitWindow);
+    mVideoColumnViews[0].reset(fitWindow);
+    mVideoColumnViews[1].reset(fitWindow);
+}
+
+void App::syncVideoViewsLayout(const ImGuiIO& io)
+{
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return;
+    }
+    const bool cmp = videoCompareActive();
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float transportBarH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
+    const Vec4f pad(mToolbarHeight, 0.0f, mFooterHeight + transportBarH, 0.0f);
+    mVideoView.setViewportPadding(pad);
+    mVideoColumnViews[0].setViewportPadding(pad);
+    mVideoColumnViews[1].setViewportPadding(pad);
+
+    const Vec2f ref = videoRefDisplaySizeForLayout();
+    const bool videoSbs = cmp && mCompositeFlags == CompositeFlags::SideBySide;
+    if (videoSbs) {
+        const float leftColumnWidth = io.DisplaySize.x * mViewSplitPos;
+        mVideoColumnViews[0].resize(Vec2f(leftColumnWidth, io.DisplaySize.y));
+        mVideoColumnViews[1].resize(Vec2f(io.DisplaySize.x - leftColumnWidth, io.DisplaySize.y));
+        mVideoColumnViews[0].setImageSize(ref);
+        mVideoColumnViews[1].setImageSize(ref);
+    } else {
+        mVideoView.resize(io.DisplaySize);
+        mVideoView.setImageSize(ref);
+    }
+}
 
 void App::getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const
 {
@@ -3211,16 +3564,41 @@ bool App::getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const
     if (!mVideoReader || !mVideoReader->isOpen()) {
         return false;
     }
-    Vec2f origin, size;
-    getVideoBlitContentLayout(io, origin, size);
-    const Vec2f sp(io.MousePos.x, io.MousePos.y);
-    if (sp.x < origin.x || sp.y < origin.y || sp.x >= origin.x + size.x || sp.y >= origin.y + size.y) {
+    const Vec2f wh(io.MousePos.x, io.DisplaySize.y - io.MousePos.y);
+    const bool cmp = videoCompareActive();
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float transportBarH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
+    const float y0 = mFooterHeight + transportBarH;
+    const float y1 = io.DisplaySize.y - mToolbarHeight;
+    if (wh.x < 0.f || wh.y < y0 || wh.x >= io.DisplaySize.x || wh.y > y1) {
         return false;
     }
-    Vec2f local((sp.x - origin.x) / (std::max)(size.x, 1.f), (sp.y - origin.y) / (std::max)(size.y, 1.f));
-    local.y = 1.0f - local.y;
-    const Vec2f vidSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
-    return videoContainPixelFromLocal(local, size, vidSize, outImagePx);
+
+    const bool vSbs = cmp && mCompositeFlags == CompositeFlags::SideBySide;
+    bool outside = false;
+    Vec2f refPx;
+    if (vSbs) {
+        const float splitPx = glm::round(io.DisplaySize.x * mViewSplitPos);
+        if (wh.x < splitPx) {
+            refPx = mVideoColumnViews[0].getImageCoords(wh, &outside);
+        } else {
+            Vec2f whR(wh.x - splitPx, wh.y);
+            refPx = mVideoColumnViews[1].getImageCoords(whR, &outside);
+        }
+    } else {
+        refPx = mVideoView.getImageCoords(wh, &outside);
+    }
+    if (outside) {
+        return false;
+    }
+    const Vec2f refSz = videoRefDisplaySizeForLayout();
+    const Vec2f texSz(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
+    return videoPixelFromRefPx(refPx, refSz, texSz, outImagePx);
 }
 
 bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const
@@ -3231,20 +3609,51 @@ bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& ou
     if (side != 0 && side != 1) {
         return false;
     }
-    Vec2f origin, size;
-    getVideoBlitContentLayout(io, origin, size);
-    const Vec2f sp(io.MousePos.x, io.MousePos.y);
-    if (sp.x < origin.x || sp.y < origin.y || sp.x >= origin.x + size.x || sp.y >= origin.y + size.y) {
+    const Vec2f wh(io.MousePos.x, io.DisplaySize.y - io.MousePos.y);
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float transportBarH = 60.0f + kVideoTransportPipelineDbgRow;
+    const float y0 = mFooterHeight + transportBarH;
+    const float y1 = io.DisplaySize.y - mToolbarHeight;
+    if (wh.x < 0.f || wh.y < y0 || wh.x >= io.DisplaySize.x || wh.y > y1) {
         return false;
     }
-    Vec2f local((sp.x - origin.x) / (std::max)(size.x, 1.f), (sp.y - origin.y) / (std::max)(size.y, 1.f));
-    local.y = 1.0f - local.y;
 
-    const float spx = glm::clamp(mViewSplitPos, 0.02f, 0.98f);
-    if (side == 0 && local.x >= spx) {
-        return false;
+    const bool vSbs = mCompositeFlags == CompositeFlags::SideBySide;
+    const float splitPx = glm::round(io.DisplaySize.x * mViewSplitPos);
+    if (vSbs) {
+        if (side == 0 && wh.x >= splitPx) {
+            return false;
+        }
+        if (side == 1 && wh.x < splitPx) {
+            return false;
+        }
+    } else {
+        const float spx = glm::clamp(mViewSplitPos, 0.02f, 0.98f) * io.DisplaySize.x;
+        if (side == 0 && wh.x >= spx) {
+            return false;
+        }
+        if (side == 1 && wh.x < spx) {
+            return false;
+        }
     }
-    if (side == 1 && local.x < spx) {
+
+    bool outside = false;
+    Vec2f refPx;
+    if (vSbs) {
+        if (side == 0) {
+            refPx = mVideoColumnViews[0].getImageCoords(wh, &outside);
+        } else {
+            Vec2f whR(wh.x - splitPx, wh.y);
+            refPx = mVideoColumnViews[1].getImageCoords(whR, &outside);
+        }
+    } else {
+        refPx = mVideoView.getImageCoords(wh, &outside);
+    }
+    if (outside) {
         return false;
     }
 
@@ -3255,8 +3664,9 @@ bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& ou
     if (!sideP || !sideP->isOpen()) {
         return false;
     }
-    const Vec2f vidSize(sideP->displayWidthForAspect(), sideP->displayHeightForAspect());
-    return videoContainPixelFromLocal(local, size, vidSize, outImagePx);
+    const Vec2f texSz(sideP->displayWidthForAspect(), sideP->displayHeightForAspect());
+    const Vec2f refSz = videoRefDisplaySizeForLayout();
+    return videoPixelFromRefPx(refPx, refSz, texSz, outImagePx);
 }
 #endif  // USE_VIDEO
 
@@ -3735,6 +4145,7 @@ void App::openVideosFromSelection()
     mVideoPathL = pathL;
     mVideoPathR = pathR;
     mVideoSwapPresentationLR = false;
+    mVideoPendingViewFitReset = true;
 
     // Reset offsets when changing active media.
     mVideoStartL = 0.0;
@@ -3846,6 +4257,7 @@ void App::exitVideoMode()
 #else
     mVideoMode = false;
     mVideoPlaying = false;
+    mVideoPendingViewFitReset = false;
     mVideoLazyDurationGraceFrames = 0;
     mVideoPlaybackTimeBank = 0.0;
     resetVideoDecoderSyncCache();
@@ -4138,6 +4550,28 @@ void App::renderVideoBlit(const ImGuiIO& io)
     mVideoBlitShader.setUniform("uWindowSize", Vec2f(io.DisplaySize.x, io.DisplaySize.y));
     mVideoBlitShader.setUniform("uContentOrigin", contentOrigin);
     mVideoBlitShader.setUniform("uContentSize", contentSize);
+
+    const float canvasY0 = mFooterHeight + transportBarH;
+    const float canvasY1 = io.DisplaySize.y - mToolbarHeight;
+    mVideoBlitShader.setUniform("uVideoCanvasRect", Vec4f(0.0f, canvasY0, io.DisplaySize.x, canvasY1));
+    const Vec2f videoRef = videoRefDisplaySizeForLayout();
+    mVideoBlitShader.setUniform("uVideoRefSize", videoRef);
+    const bool videoSbsLayout = cmp && mCompositeFlags == CompositeFlags::SideBySide;
+    if (videoSbsLayout) {
+        mVideoBlitShader.setUniform("uVideoOffset", mVideoColumnViews[0].getImageOffset());
+        mVideoBlitShader.setUniform("uVideoOffsetExtra", mVideoColumnViews[1].getImageOffset());
+        mVideoBlitShader.setUniform("uVideoRelativeOffset",
+            (mVideoColumnViews[1].getLocalOffset() - mVideoColumnViews[0].getLocalOffset())
+                * mVideoColumnViews[0].getImageScale());
+        mVideoBlitShader.setUniform("uVideoImageScale", mVideoColumnViews[0].getImageScale());
+        mVideoBlitShader.setUniform("uVideoSideBySide", 1);
+    } else {
+        mVideoBlitShader.setUniform("uVideoOffset", mVideoView.getImageOffset());
+        mVideoBlitShader.setUniform("uVideoOffsetExtra", mVideoView.getImageOffset());
+        mVideoBlitShader.setUniform("uVideoRelativeOffset", Vec2f(0.0f));
+        mVideoBlitShader.setUniform("uVideoImageScale", mVideoView.getImageScale());
+        mVideoBlitShader.setUniform("uVideoSideBySide", 0);
+    }
 
     if (cmp && mVideoTextureB != 0) {
         const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
