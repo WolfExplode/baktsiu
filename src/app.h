@@ -241,6 +241,13 @@ private:
 
     bool    videoCompareActive() const;
 
+#if defined(USE_VIDEO)
+    // Match renderVideoBlit: drawable content rect below toolbar / above transport + footer.
+    void    getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const;
+    bool    getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const;
+    bool    getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const;
+#endif
+
     void    recomputeVideoScrubBounds(double& outMin, double& outMax) const;
 
     void    clampVideoCompositionT();

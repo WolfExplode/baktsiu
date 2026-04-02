@@ -262,6 +262,8 @@ void PlotMultiHistograms(
 namespace
 {
 
+const char* const kInfoPopupName = "Info";
+
 void formatVideoHms(double secIn, char* out, size_t outSize)
 {
     if (outSize == 0) {
@@ -897,7 +899,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
     } else if (ImGui::IsKeyPressed(0x57)) { // w
         mShowPixelMarker ^= true;
     } else if (ImGui::IsKeyPressed(0x122)) { // F1
-        ImGui::OpenPopup("Home");
+        ImGui::OpenPopup(kInfoPopupName);
     } else if (ImGui::IsKeyPressed(0x126)) { // F5
         Image* image = getTopImage();
         if (image) image->reload();
@@ -908,7 +910,7 @@ void    App::onKeyPressed(const ImGuiIO& io)
         // ps. There are few other key pressed cases are handled in updateImageTransform().
     }
 
-    initHomeWindow("Home");
+    initHomeWindow(kInfoPopupName);
 
     if (showRemoveImageDlg(kImageRemoveDlgTitle)) {
         removeTopImage(true);
@@ -1244,22 +1246,21 @@ void    App::initToolbar()
     ImGui::Begin("toolbar", nullptr, ImGuiWindowFlags_NoDecoration);
 
     const Vec2f buttonSize(26.0f);
-    const char* popupWindowName = "Home";
+    const float toolbarTextBtnH = 26.0f;
 
-    if (ImGui::Button(ICON_FA_HOME, buttonSize)) {
-        ImGui::OpenPopup(popupWindowName);
+    if (ImGui::Button(ICON_FA_INFO "##toolbarInfo", ImVec2(0.f, toolbarTextBtnH))) {
+        ImGui::OpenPopup(kInfoPopupName);
     }
-    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Home Window"); }
-
+    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Info"); }
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_IMPORT, buttonSize)) {
+    if (ImGui::Button((std::string(ICON_FA_FILE_IMPORT) + " Import##toolbarImport").c_str(), ImVec2(0.f, toolbarTextBtnH))) {
         showImportImageDlg();
     }
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Import Images"); }
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_EXPORT, buttonSize)) {
+    if (ImGui::Button((std::string(ICON_FA_FILE_EXPORT) + " Export##toolbarExport").c_str(), ImVec2(0.f, toolbarTextBtnH))) {
         showExportSessionDlg();
     }
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Export Session"); }
@@ -1399,7 +1400,7 @@ void    App::initToolbar()
     ImGui::PopStyleColor(1);
     ImGui::PopStyleVar(7);
 
-    initHomeWindow(popupWindowName);
+    initHomeWindow(kInfoPopupName);
     ImGui::End();
 }
 
@@ -1714,15 +1715,17 @@ void App::initImagePropWindow()
     ImGui::PopStyleVar(1);
     ImGui::EndChild();
 
-    const int buttonNum = 4;
     ImGui::PushFont(mSmallIconFont);
-    ImGui::Dummy(Vec2f(propWindowWidth - (buttonSize.x + g.Style.ItemSpacing.x) * buttonNum - handleWidth, buttonSize.y));
+    const std::string importPropLbl = std::string(ICON_FA_FILE_IMPORT) + " Import##propImport";
+    const float importPropBtnW = ImGui::CalcTextSize(importPropLbl.c_str()).x + g.Style.FramePadding.x * 2.f;
+    const float propRowBtnsW = importPropBtnW + g.Style.ItemSpacing.x + (buttonSize.x + g.Style.ItemSpacing.x) * 3;
+    ImGui::Dummy(Vec2f(propWindowWidth - propRowBtnsW - handleWidth, buttonSize.y));
     ImGui::SameLine();
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
     ImGui::PushStyleColor(ImGuiCol_Button, g.Style.Colors[ImGuiCol_MenuBarBg]);
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_IMPORT "##ImportImage", buttonSize)) {
+    if (ImGui::Button(importPropLbl.c_str(), ImVec2(0.f, buttonSize.y))) {
         showImportImageDlg();
     }
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Import Images"); }
@@ -1790,6 +1793,50 @@ void App::initFooter()
 
     ImGui::Text("%s", mImageScaleInfo);
 
+#if defined(USE_VIDEO)
+    const bool videoFooterDims = mVideoMode && mVideoReader && mVideoReader->isOpen();
+    if (videoFooterDims) {
+        if (videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()) {
+            const bool dispSwap = mVideoSwapPresentationLR;
+            const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+            const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+            const Vec2f leftSz(leftP->displayWidthForAspect(), leftP->displayHeightForAspect());
+            const Vec2f rightSz(rightP->displayWidthForAspect(), rightP->displayHeightForAspect());
+
+            ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
+            ImGui::Text("L | %.0f x %.0f", leftSz.x, leftSz.y);
+            Vec2f lcoords;
+            if (getCompareSideVideoPixelAtMouse(g.IO, 0, lcoords)) {
+                ImGui::SameLine();
+                ImGui::Text("(%.0f, %.0f)", lcoords.x, leftSz.y - lcoords.y - 1.0f);
+            }
+
+            char rbuf[128];
+            Vec2f rcoords;
+            if (getCompareSideVideoPixelAtMouse(g.IO, 1, rcoords)) {
+                sprintf_s(rbuf, "R | %.0f x %.0f (%.0f, %.0f)", rightSz.x, rightSz.y, rcoords.x,
+                    rightSz.y - rcoords.y - 1.0f);
+            } else {
+                sprintf_s(rbuf, "R | %.0f x %.0f", rightSz.x, rightSz.y);
+            }
+            const float rtextW = ImGui::CalcTextSize(rbuf).x;
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - rtextW);
+            ImGui::TextUnformatted(rbuf);
+        } else {
+            const Vec2f imageSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
+            ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
+            ImGui::Text("| %.0f x %.0f", imageSize.x, imageSize.y);
+            Vec2f imageCoords;
+            if (getSingleVideoPixelAtMouse(g.IO, imageCoords)) {
+                ImGui::SameLine();
+                imageCoords.y = imageSize.y - imageCoords.y - 1;
+                ImGui::Text("(%.0f, %.0f)", imageCoords.x, imageCoords.y);
+            }
+        }
+    } else
+#endif
+    {
     const bool compareUi = inCompareMode() && mTopImageIndex >= 0 && mCmpImageIndex >= 0;
 
     if (compareUi) {
@@ -1837,6 +1884,7 @@ void App::initFooter()
         ImGui::TextUnformatted(filename.c_str());
     }
 
+    }
     ImGui::End();
     ImGui::PopFont();
 }
@@ -1917,16 +1965,17 @@ void    App::showImageProperties()
 
 void    App::initHomeWindow(const char* name)
 {
-    bool open = true;
-    
     ImGui::SetNextWindowContentWidth(500.0f);
-    if (ImGui::BeginPopupModal(name, &open, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+    if (ImGui::BeginPopupModal(name, nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape))) {
+            ImGui::CloseCurrentPopup();
+        }
         //ImGui::Dummy(Vec2f(550.0f, ImGui::GetFrameHeight()));
         if (ImGui::BeginTabBar("ControlsBar", ImGuiTabBarFlags_None)) {
             if (ImGui::BeginTabItem("Controls")) {
                 ImGui::Columns(2, nullptr, false);
 
-                ImGui::Text("Show Home Panel");
+                ImGui::Text("Show Info Panel");
                 ImGui::Text("Toggle Property Window");
                 ImGui::Text("Toggle Split View");
                 ImGui::Text("Toggle Side-by-Side Column View");
@@ -2769,6 +2818,104 @@ bool App::videoCompareActive() const
 #endif
 }
 
+#if defined(USE_VIDEO)
+namespace
+{
+// Compare: scrub row + L/R offsets (no extra header row). Must match initVideoTransportBar / blit viewport.
+constexpr float kVideoTransportBarHeightCompare = 60.0f;
+constexpr float kVideoTransportBarHeightSingle = 36.0f;
+
+bool videoContainPixelFromLocal(Vec2f localBL, Vec2f panelPx, Vec2f vidSize, Vec2f& outPx)
+{
+    const float vw = (std::max)(vidSize.x, 1.f);
+    const float vh = (std::max)(vidSize.y, 1.f);
+    const float pw = (std::max)(panelPx.x, 1.f);
+    const float ph = (std::max)(panelPx.y, 1.f);
+    const float s = (std::min)(pw / vw, ph / vh);
+    const Vec2f disp(vw * s / pw, vh * s / ph);
+    const Vec2f off((1.f - disp.x) * 0.5f, (1.f - disp.y) * 0.5f);
+    const Vec2f vidUv((localBL.x - off.x) / (std::max)(disp.x, 1e-5f),
+        (localBL.y - off.y) / (std::max)(disp.y, 1e-5f));
+    if (vidUv.x < -1e-4f || vidUv.x > 1.f + 1e-4f || vidUv.y < -1e-4f || vidUv.y > 1.f + 1e-4f) {
+        return false;
+    }
+    outPx.x = std::floor(vidUv.x * vw);
+    outPx.y = std::floor(vidUv.y * vh);
+    outPx.x = glm::clamp(outPx.x, 0.f, (std::max)(vw - 1.f, 0.f));
+    outPx.y = glm::clamp(outPx.y, 0.f, (std::max)(vh - 1.f, 0.f));
+    return true;
+}
+}  // namespace
+
+void App::getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const
+{
+    const bool cmp = videoCompareActive();
+#if defined(BAKTSIU_DEBUG_BUILD)
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+#else
+    constexpr float kVideoTransportPipelineDbgRow = 0.0f;
+#endif
+    const float transportBarH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
+    const float contentH = io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
+    outContentOrigin = Vec2f(0.0f, mToolbarHeight);
+    outContentSize = Vec2f(io.DisplaySize.x, (std::max)(1.0f, contentH));
+}
+
+bool App::getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const
+{
+    if (!mVideoReader || !mVideoReader->isOpen()) {
+        return false;
+    }
+    Vec2f origin, size;
+    getVideoBlitContentLayout(io, origin, size);
+    const Vec2f sp(io.MousePos.x, io.MousePos.y);
+    if (sp.x < origin.x || sp.y < origin.y || sp.x >= origin.x + size.x || sp.y >= origin.y + size.y) {
+        return false;
+    }
+    Vec2f local((sp.x - origin.x) / (std::max)(size.x, 1.f), (sp.y - origin.y) / (std::max)(size.y, 1.f));
+    local.y = 1.0f - local.y;
+    const Vec2f vidSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
+    return videoContainPixelFromLocal(local, size, vidSize, outImagePx);
+}
+
+bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const
+{
+    if (!videoCompareActive() || !mVideoReader || !mVideoReader->isOpen() || !mVideoReaderB || !mVideoReaderB->isOpen()) {
+        return false;
+    }
+    if (side != 0 && side != 1) {
+        return false;
+    }
+    Vec2f origin, size;
+    getVideoBlitContentLayout(io, origin, size);
+    const Vec2f sp(io.MousePos.x, io.MousePos.y);
+    if (sp.x < origin.x || sp.y < origin.y || sp.x >= origin.x + size.x || sp.y >= origin.y + size.y) {
+        return false;
+    }
+    Vec2f local((sp.x - origin.x) / (std::max)(size.x, 1.f), (sp.y - origin.y) / (std::max)(size.y, 1.f));
+    local.y = 1.0f - local.y;
+
+    const float spx = glm::clamp(mViewSplitPos, 0.02f, 0.98f);
+    if (side == 0 && local.x >= spx) {
+        return false;
+    }
+    if (side == 1 && local.x < spx) {
+        return false;
+    }
+
+    const bool dispSwap = mVideoSwapPresentationLR;
+    const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
+    const MpvGlPlayer* rightP = dispSwap ? mVideoReader.get() : mVideoReaderB.get();
+    const MpvGlPlayer* sideP = (side == 0) ? leftP : rightP;
+    if (!sideP || !sideP->isOpen()) {
+        return false;
+    }
+    const Vec2f vidSize(sideP->displayWidthForAspect(), sideP->displayHeightForAspect());
+    return videoContainPixelFromLocal(local, size, vidSize, outImagePx);
+}
+#endif  // USE_VIDEO
+
 void App::recomputeVideoScrubBounds(double& outMin, double& outMax) const
 {
 #if !defined(USE_VIDEO)
@@ -3497,25 +3644,37 @@ void App::tickAndUploadVideoFrame(float deltaTime)
             mVideoComparePlaybackBank -= static_cast<double>(n) * step;
         }
 
-        // Our composition clock follows the number of steps we actually issued.
-        mVideoCompositionT += static_cast<double>(n) * step;
         constexpr double kEndEps = 1.0 / 240.0;
-        if (mVideoCompositionT >= tMax - kEndEps) {
-            mVideoCompositionT = tMax;
-            mVideoPlaying = false;
-            mVideoComparePlaybackBank = 0.0;
-        }
-        clampVideoCompositionT();
         if (n > 0) {
-            // Step both streams; keep them in lockstep in "displayed frames", not absolute time.
+            // Step both streams in lockstep; advance composition time only for successful pairs (decodeFrame
+            // returns false at eof-reached — same as single-video playback).
             for (int i = 0; i < n; ++i) {
-                (void)mVideoReader->decodeFrame(true);
-                if (mVideoReaderB && mVideoReaderB->isOpen()) {
-                    (void)mVideoReaderB->decodeFrame(true);
+                if (!mVideoReader->decodeFrame(true)) {
+                    mVideoComparePlaybackBank = 0.0;
+                    mVideoPlaying = false;
+                    break;
+                }
+                if (!mVideoReaderB || !mVideoReaderB->isOpen() || !mVideoReaderB->decodeFrame(true)) {
+                    mVideoComparePlaybackBank = 0.0;
+                    mVideoPlaying = false;
+                    break;
+                }
+                mVideoCompositionT += step;
+                if (mVideoCompositionT >= tMax - kEndEps) {
+                    mVideoCompositionT = tMax;
+                    mVideoComparePlaybackBank = 0.0;
+                    mVideoPlaying = false;
+                    break;
                 }
             }
             uploadVideoTexture();
             uploadVideoTextureB();
+        }
+        clampVideoCompositionT();
+        if (mVideoCompositionT >= tMax - kEndEps) {
+            mVideoCompositionT = tMax;
+            mVideoPlaying = false;
+            mVideoComparePlaybackBank = 0.0;
         }
 
 #if defined(BAKTSIU_DEBUG_BUILD)
@@ -3590,7 +3749,8 @@ void App::renderVideoBlit(const ImGuiIO& io)
 #else
     constexpr float kVideoTransportPipelineDbgRow = 0.0f;
 #endif
-    const float transportBarH = (cmp ? 80.0f : 36.0f) + kVideoTransportPipelineDbgRow;
+    const float transportBarH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
     const float contentH =
         io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
     const Vec2f contentOrigin(0.0f, mToolbarHeight);
@@ -3657,7 +3817,8 @@ void App::initVideoTransportBar(const ImGuiIO& io)
 #else
     constexpr float kVideoTransportPipelineDbgRow = 0.0f;
 #endif
-    const float barH = (cmp ? 80.0f : 36.0f) + kVideoTransportPipelineDbgRow;
+    const float barH =
+        (cmp ? kVideoTransportBarHeightCompare : kVideoTransportBarHeightSingle) + kVideoTransportPipelineDbgRow;
     ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -3778,8 +3939,6 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             ImGui::SameLine();
             ImGui::TextDisabled("(duration unknown)");
         }
-
-        ImGui::TextUnformatted("Offsets (composition time at media 0):");
 
         static char sOffBufL[64] = "";
         static char sOffBufR[64] = "";
