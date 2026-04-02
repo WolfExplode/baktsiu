@@ -27,6 +27,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -726,6 +727,7 @@ void App::run(CompositeFlags initFlags)
                     videoReaderDidRewind |= mVideoReaderB->lazyProbePresentationDuration();
                 }
                 if (videoReaderDidRewind) {
+                    resetVideoDecoderSyncCache();
                     syncVideoDecodersToCompositionT();
                 }
             }
@@ -2696,6 +2698,8 @@ void    App::saveSession(const std::string& filepath)
 namespace
 {
 constexpr double kVideoScrubUnknownMaxSec = 3600.0 * 24.0;  // 24h upper composition bound when duration unknown
+// Must stay in sync with kForwardCatchupSec in mf_video_reader.cpp seek().
+constexpr double kMfForwardSeekCatchupSec = 1.35;
 
 double videoScrubSpanSec(const MFVideoReader* r)
 {
@@ -2722,6 +2726,51 @@ double mediaTimeFromComposition(double T, double startS, double durationSec)
         t = 0.0;
     }
     return t;
+}
+
+// Skip redundant seek/decode when scrubbing if target media time barely changed (compare mode: one
+// stream often stays clamped while the other moves).
+double mediaSyncEpsilonSec(const MFVideoReader* r)
+{
+    if (!r || !r->isOpen()) {
+        return 1e-4;
+    }
+    double fd = r->frameDurationSec();
+    if (fd < 1e-6 || fd > 1.0) {
+        fd = 1.0 / 30.0;
+    }
+    return (std::max)(1e-4, fd * 0.25);
+}
+
+struct VideoScrubDecodeHint {
+    bool run = false;
+    // 0 = full decodeFrameThrough iteration budget; >0 = cap ReadSamples (scrub preview only).
+    int maxReadCapPerStream = 0;
+};
+
+// MF seek+decode is CPU-bound. While dragging: throttle + use a small read cap between previews; on grab,
+// release, or click: full decode to target frame.
+VideoScrubDecodeHint videoScrubDecodeHint(bool itemActive, bool itemActivated, bool itemClicked, bool valueChanged,
+    bool itemDeactivated, double imguiTimeSec, double& lastDecodeTimeSec)
+{
+    VideoScrubDecodeHint out;
+    constexpr double kMinIntervalSec = 1.0 / 20.0;
+    constexpr int kPreviewReadCap = 96;
+    if (itemDeactivated || itemActivated || itemClicked) {
+        lastDecodeTimeSec = imguiTimeSec;
+        out.run = true;
+        out.maxReadCapPerStream = 0;
+        return out;
+    }
+    if (itemActive && valueChanged) {
+        if (imguiTimeSec - lastDecodeTimeSec >= kMinIntervalSec) {
+            lastDecodeTimeSec = imguiTimeSec;
+            out.run = true;
+            out.maxReadCapPerStream = kPreviewReadCap;
+            return out;
+        }
+    }
+    return out;
 }
 }  // namespace
 
@@ -2773,27 +2822,87 @@ void App::clampVideoCompositionT()
 #endif
 }
 
-void App::syncVideoDecodersToCompositionT()
+void App::syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream)
 {
 #if !defined(USE_VIDEO)
+    (void)maxDecodeReadCapPerStream;
     return;
 #else
     if (!mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
+    if (mVideoLogPipelineTiming) {
+        mVideoDbgLastUploadLMs = 0.f;
+        mVideoDbgLastUploadRMs = 0.f;
+    }
+    bool ranDecodeL = false;
+    bool ranDecodeR = false;
     const double dL = videoScrubSpanSec(mVideoReader.get());
     const double tL = mediaTimeFromComposition(mVideoCompositionT, mVideoStartL, dL);
-    mVideoReader->seek(tL);
-    mVideoReader->decodeFrameThrough(tL);
-    uploadVideoTexture();
+    const double epsL = mediaSyncEpsilonSec(mVideoReader.get());
+    const bool needL = (mVideoLastSyncedTargetMediaL < 0.0)
+        || (std::fabs(tL - mVideoLastSyncedTargetMediaL) > epsL);
+    if (needL) {
+        mVideoReader->seek(tL, maxDecodeReadCapPerStream <= 0);
+        mVideoReader->decodeFrameThrough(tL, maxDecodeReadCapPerStream);
+        uploadVideoTexture();
+        ranDecodeL = true;
+        // Preview decodes use a read cap and may not reach target; keep cache for skip-optimization
+        // aligned with full-quality sync only.
+        if (maxDecodeReadCapPerStream <= 0) {
+            mVideoLastSyncedTargetMediaL = tL;
+        }
+    }
     if (videoCompareActive()) {
         const double dR = videoScrubSpanSec(mVideoReaderB.get());
         const double tR = mediaTimeFromComposition(mVideoCompositionT, mVideoStartR, dR);
-        mVideoReaderB->seek(tR);
-        mVideoReaderB->decodeFrameThrough(tR);
-        uploadVideoTextureB();
+        const double epsR = mediaSyncEpsilonSec(mVideoReaderB.get());
+        const bool needR = (mVideoLastSyncedTargetMediaR < 0.0)
+            || (std::fabs(tR - mVideoLastSyncedTargetMediaR) > epsR);
+        if (needR) {
+            mVideoReaderB->seek(tR, maxDecodeReadCapPerStream <= 0);
+            mVideoReaderB->decodeFrameThrough(tR, maxDecodeReadCapPerStream);
+            uploadVideoTextureB();
+            ranDecodeR = true;
+            if (maxDecodeReadCapPerStream <= 0) {
+                mVideoLastSyncedTargetMediaR = tR;
+            }
+        }
+    } else {
+        mVideoLastSyncedTargetMediaR = -1.0;
+    }
+    if (mVideoLogPipelineTiming && (ranDecodeL || ranDecodeR)) {
+        if (ranDecodeL) {
+            LOGI(
+                "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+                "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+                maxDecodeReadCapPerStream, static_cast<double>(mVideoReader->lastSeekMs()),
+                static_cast<double>(mVideoReader->lastSeekFlushMs()),
+                static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+                static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+                mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+                static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+        }
+        if (ranDecodeR && mVideoReaderB && mVideoReaderB->isOpen()) {
+            LOGI(
+                "[video-pipe] readCap={} R: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+                "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+                maxDecodeReadCapPerStream, static_cast<double>(mVideoReaderB->lastSeekMs()),
+                static_cast<double>(mVideoReaderB->lastSeekFlushMs()),
+                static_cast<double>(mVideoReaderB->lastSeekSetPosMs()),
+                static_cast<double>(mVideoReaderB->lastDecodeThroughMs()),
+                mVideoReaderB->lastDecodeThroughReads(), mVideoReaderB->lastDecodeThroughHitCap() ? 1 : 0,
+                static_cast<double>(mVideoDbgLastUploadRMs), mVideoReaderB->usesGpuNv12Path() ? 1 : 0);
+        }
     }
 #endif
+}
+
+void App::resetVideoDecoderSyncCache()
+{
+    mVideoLastSyncedTargetMediaL = -1.0;
+    mVideoLastSyncedTargetMediaR = -1.0;
+    mVideoLastScrubDecodeTime = -1.0e9;
 }
 
 void App::stepVideoScrubFiveSeconds(int direction)
@@ -2832,9 +2941,23 @@ void App::stepVideoScrubFiveSeconds(int direction)
     } else if (newPos > tMax) {
         newPos = tMax;
     }
+    if (mVideoLogPipelineTiming) {
+        mVideoDbgLastUploadLMs = 0.f;
+    }
     mVideoReader->seek(newPos);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
+    if (mVideoLogPipelineTiming) {
+        LOGI(
+            "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+            "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+            0, static_cast<double>(mVideoReader->lastSeekMs()),
+            static_cast<double>(mVideoReader->lastSeekFlushMs()),
+            static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+            static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+            mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+            static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+    }
     mVideoScrubValue = mVideoReader->positionSec();
 #endif
 }
@@ -2884,9 +3007,28 @@ void App::stepVideoScrubOneFrame(int direction)
     } else if (newPos > tMax) {
         newPos = tMax;
     }
-    mVideoReader->seek(newPos);
+    if (mVideoLogPipelineTiming) {
+        mVideoDbgLastUploadLMs = 0.f;
+    }
+    // Small forward steps: MFVideoReader::seek(..., false) skips Flush+SetCurrentPosition (avoids ~1s Flush
+    // stalls) and advances via decodeFrameThrough(ReadSample). Backward and large forward jumps still flush.
+    const double deltaSec = newPos - pos;
+    const bool forwardCatchup =
+        direction > 0 && deltaSec >= -1e-9 && deltaSec <= kMfForwardSeekCatchupSec;
+    mVideoReader->seek(newPos, !forwardCatchup);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
+    if (mVideoLogPipelineTiming) {
+        LOGI(
+            "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) decode+buf={:.2f}ms "
+            "reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+            0, static_cast<double>(mVideoReader->lastSeekMs()),
+            static_cast<double>(mVideoReader->lastSeekFlushMs()),
+            static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+            static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+            mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+            static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+    }
     mVideoScrubValue = mVideoReader->positionSec();
 #endif
 }
@@ -3081,6 +3223,12 @@ void App::openVideosFromSelection()
 
     mVideoReader = std::move(readerL);
     mVideoReaderB = std::move(readerR);
+    if (mVideoReader) {
+        mVideoReader->setPipelineTimingLog(mVideoLogPipelineTiming);
+    }
+    if (mVideoReaderB) {
+        mVideoReaderB->setPipelineTimingLog(mVideoLogPipelineTiming);
+    }
     mVideoMode = true;
     mVideoPlaying = true;
     mVideoPlaybackTimeBank = 0.0;
@@ -3101,6 +3249,7 @@ void App::openVideosFromSelection()
 
     recreateVideoTexture();
     recreateVideoTextureB();
+    resetVideoDecoderSyncCache();
     syncVideoDecodersToCompositionT();
 
     mVideoLazyDurationGraceFrames = 0;
@@ -3194,6 +3343,7 @@ void App::exitVideoMode()
     mVideoPlaying = false;
     mVideoLazyDurationGraceFrames = 0;
     mVideoPlaybackTimeBank = 0.0;
+    resetVideoDecoderSyncCache();
     mVideoStartL = mVideoStartR = 0.0;
     mVideoCompositionT = 0.0;
     mVideoSwapPresentationLR = false;
@@ -3370,6 +3520,9 @@ void App::uploadVideoTexture()
     if (mVideoTexture == 0 || !mVideoReader || !mVideoReader->isOpen()) {
         return;
     }
+    namespace chrono = std::chrono;
+    const bool timeUpload = mVideoLogPipelineTiming;
+    const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (mVideoReader->usesGpuNv12Path()) {
         const int stride = mVideoReader->nv12StrideBytes();
@@ -3395,6 +3548,9 @@ void App::uploadVideoTexture()
             GL_RGBA, GL_UNSIGNED_BYTE, mVideoReader->rgbaBuffer());
     }
     glBindTexture(GL_TEXTURE_2D, 0);
+    if (timeUpload) {
+        mVideoDbgLastUploadLMs = chrono::duration<float, std::milli>(chrono::steady_clock::now() - tUpload0).count();
+    }
 #endif
 }
 
@@ -3406,6 +3562,9 @@ void App::uploadVideoTextureB()
     if (mVideoTextureB == 0 || !mVideoReaderB || !mVideoReaderB->isOpen()) {
         return;
     }
+    namespace chrono = std::chrono;
+    const bool timeUpload = mVideoLogPipelineTiming;
+    const auto tUpload0 = timeUpload ? chrono::steady_clock::now() : chrono::steady_clock::time_point {};
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (mVideoReaderB->usesGpuNv12Path()) {
         const int stride = mVideoReaderB->nv12StrideBytes();
@@ -3429,6 +3588,9 @@ void App::uploadVideoTextureB()
             GL_RGBA, GL_UNSIGNED_BYTE, mVideoReaderB->rgbaBuffer());
     }
     glBindTexture(GL_TEXTURE_2D, 0);
+    if (timeUpload) {
+        mVideoDbgLastUploadRMs = chrono::duration<float, std::milli>(chrono::steady_clock::now() - tUpload0).count();
+    }
 #endif
 }
 
@@ -3492,7 +3654,9 @@ void App::renderVideoBlit(const ImGuiIO& io)
     const bool cmp = videoCompareActive();
     const bool anyNv12 = (mVideoReader && mVideoReader->usesGpuNv12Path())
         || (mVideoReaderB && mVideoReaderB->usesGpuNv12Path());
-    const float transportBarH = (cmp ? 80.0f : 36.0f) + (anyNv12 ? 28.0f : 0.0f);
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+    const float transportBarH =
+        (cmp ? 80.0f : 36.0f) + (anyNv12 ? 28.0f : 0.0f) + kVideoTransportPipelineDbgRow;
     const float contentH =
         io.DisplaySize.y - mToolbarHeight - mFooterHeight - transportBarH;
     const Vec2f contentOrigin(0.0f, mToolbarHeight);
@@ -3621,7 +3785,9 @@ void App::initVideoTransportBar(const ImGuiIO& io)
     const bool cmp = videoCompareActive();
     const bool anyNv12 = (mVideoReader && mVideoReader->usesGpuNv12Path())
         || (mVideoReaderB && mVideoReaderB->usesGpuNv12Path());
-    const float barH = (cmp ? 80.0f : 36.0f) + (anyNv12 ? 28.0f : 0.0f);
+    constexpr float kVideoTransportPipelineDbgRow = 26.0f;
+    const float barH =
+        (cmp ? 80.0f : 36.0f) + (anyNv12 ? 28.0f : 0.0f) + kVideoTransportPipelineDbgRow;
     ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y - mFooterHeight - barH));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, barH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -3696,12 +3862,17 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const bool itemActive = ImGui::IsItemActive();
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
-        if (itemActive || itemActivated || valueChanged || itemClicked) {
+        const bool itemDeactivated = ImGui::IsItemDeactivated();
+        if (itemActive || itemActivated || valueChanged || itemClicked || itemDeactivated) {
             mVideoCompositionT = mVideoScrubValue;
             clampVideoCompositionT();
             mVideoPlaybackTimeBank = 0.0;
-            syncVideoDecodersToCompositionT();
             mVideoPlaying = false;
+            const VideoScrubDecodeHint scrubHint = videoScrubDecodeHint(itemActive, itemActivated, itemClicked,
+                valueChanged, itemDeactivated, ImGui::GetTime(), mVideoLastScrubDecodeTime);
+            if (scrubHint.run) {
+                syncVideoDecodersToCompositionT(scrubHint.maxReadCapPerStream);
+            }
         }
         if (!itemActive) {
             mVideoScrubValue = mVideoCompositionT;
@@ -3864,12 +4035,28 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const bool itemActive = ImGui::IsItemActive();
         const bool itemActivated = ImGui::IsItemActivated();
         const bool itemClicked = ImGui::IsItemClicked();
-        if (itemActive || itemActivated || valueChanged || itemClicked) {
+        const bool itemDeactivated = ImGui::IsItemDeactivated();
+        if (itemActive || itemActivated || valueChanged || itemClicked || itemDeactivated) {
             mVideoPlaybackTimeBank = 0.0;
-            mVideoReader->seek(mVideoScrubValue);
-            mVideoReader->decodeFrameThrough(mVideoScrubValue);
-            uploadVideoTexture();
             mVideoPlaying = false;
+            const VideoScrubDecodeHint scrubHint = videoScrubDecodeHint(itemActive, itemActivated, itemClicked,
+                valueChanged, itemDeactivated, ImGui::GetTime(), mVideoLastScrubDecodeTime);
+            if (scrubHint.run) {
+                mVideoReader->seek(mVideoScrubValue, scrubHint.maxReadCapPerStream <= 0);
+                mVideoReader->decodeFrameThrough(mVideoScrubValue, scrubHint.maxReadCapPerStream);
+                uploadVideoTexture();
+                if (mVideoLogPipelineTiming) {
+                    LOGI(
+                        "[video-pipe] readCap={} L: seek={:.2f}ms (flush={:.2f} setPos={:.2f}) "
+                        "decode+buf={:.2f}ms reads={} hitIterCap={} upload={:.2f}ms nv12Out={}",
+                        scrubHint.maxReadCapPerStream, static_cast<double>(mVideoReader->lastSeekMs()),
+                        static_cast<double>(mVideoReader->lastSeekFlushMs()),
+                        static_cast<double>(mVideoReader->lastSeekSetPosMs()),
+                        static_cast<double>(mVideoReader->lastDecodeThroughMs()),
+                        mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
+                        static_cast<double>(mVideoDbgLastUploadLMs), mVideoReader->usesGpuNv12Path() ? 1 : 0);
+                }
+            }
         }
         if (!itemActive) {
             mVideoScrubValue = mVideoReader->positionSec();
@@ -3890,6 +4077,18 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             ImGui::TextDisabled("(duration unknown)");
         }
     }
+
+    ImGui::Separator();
+    if (ImGui::Checkbox("Log pipeline (console)##videopipe", &mVideoLogPipelineTiming)) {
+        if (mVideoReader) {
+            mVideoReader->setPipelineTimingLog(mVideoLogPipelineTiming);
+        }
+        if (mVideoReaderB) {
+            mVideoReaderB->setPipelineTimingLog(mVideoLogPipelineTiming);
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("seek / decode+buf / upload ms");
 
     if (anyNv12) {
         ImGui::Separator();

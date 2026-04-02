@@ -37,11 +37,15 @@ public:
     double positionSec() const { return m_positionSec; }
     double frameDurationSec() const { return m_frameDurationSec; }
 
-    void seek(double seconds);
+    // flushStreams: false for scrub preview (skips Flush when safe). Backward seeks still flush so
+    // SetCurrentPosition stays fast; small forward steps skip Flush+SetCurrentPosition and rely on
+    // decodeFrameThrough(ReadSample) only.
+    void seek(double seconds, bool flushStreams = true);
     // Pull next video sample into internal RGBA; returns true if pixels changed.
     bool decodeFrame();
     // After seek/scrub: advance through decoded output until frame time >= targetSec (MF often starts at a keyframe).
-    bool decodeFrameThrough(double targetSec);
+    // maxReadSamplesCap > 0 limits ReadSample iterations (faster scrub preview; may stop on a nearby frame).
+    bool decodeFrameThrough(double targetSec, int maxReadSamplesCap = 0);
 
     const uint8_t* rgbaBuffer() const { return m_rgba.data(); }
 
@@ -57,6 +61,16 @@ public:
     // Skipped for .mp4/.m4v/.mov (moov parse already ran). Call from the main thread after first frames.
     // Returns true if the reader was rewound to t=0 (caller should resync, e.g. syncVideoDecodersToCompositionT).
     bool lazyProbePresentationDuration();
+
+    // When true, seek/decodeFrameThrough record timings (see last* accessors). For scrub profiling.
+    void setPipelineTimingLog(bool on);
+    float lastSeekMs() const { return m_lastSeekMs; }
+    // Sub-steps of last seek() (Win32 MF); 0 when stub or timing off.
+    float lastSeekFlushMs() const { return m_lastSeekFlushMs; }
+    float lastSeekSetPosMs() const { return m_lastSeekSetPosMs; }
+    float lastDecodeThroughMs() const { return m_lastDecodeThroughMs; }
+    int lastDecodeThroughReads() const { return m_lastDecodeThroughReads; }
+    bool lastDecodeThroughHitCap() const { return m_lastDecodeThroughHitCap; }
 
 private:
     friend struct MFVideoReaderDecodeDetail;
@@ -82,6 +96,14 @@ private:
     std::vector<uint8_t> m_nv12;
     int m_nv12YBufRows = 0;
     int m_nv12DiagLogFrames = 0;
+
+    bool m_logPipelineTiming = false;
+    float m_lastSeekMs = 0.f;
+    float m_lastSeekFlushMs = 0.f;
+    float m_lastSeekSetPosMs = 0.f;
+    float m_lastDecodeThroughMs = 0.f;
+    int m_lastDecodeThroughReads = 0;
+    bool m_lastDecodeThroughHitCap = false;
 };
 
 }  // namespace baktsiu

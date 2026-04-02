@@ -46,6 +46,48 @@ double qpcMs(const LARGE_INTEGER& a, const LARGE_INTEGER& b)
     return static_cast<double>(b.QuadPart - a.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 }
 
+// Flush video only first: Flush(ALL_STREAMS) can block ~1s draining multiplexed audio while this
+// reader only ever uses ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM).
+HRESULT flushSourceReaderVideoFirst(IMFSourceReader* reader)
+{
+    HRESULT hr = reader->Flush((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+    if (FAILED(hr)) {
+        hr = reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
+        if (FAILED(hr)) {
+            LOGW("IMFSourceReader::Flush failed: 0x{:x}", static_cast<unsigned>(hr));
+        }
+    }
+    return hr;
+}
+
+// Video-only: deselect audio, subtitles, etc. so MF does not decode or buffer them (faster seek/scrub).
+void disableNonVideoSourceReaderStreams(IMFSourceReader* reader)
+{
+    if (!reader) {
+        return;
+    }
+    for (DWORD i = 0; i < 64u; ++i) {
+        BOOL dummySel = FALSE;
+        if (FAILED(reader->GetStreamSelection(i, &dummySel))) {
+            break;
+        }
+        IMFMediaType* native = nullptr;
+        const HRESULT hrType = reader->GetNativeMediaType(i, 0, &native);
+        if (FAILED(hrType) || !native) {
+            continue;
+        }
+        GUID major = GUID_NULL;
+        const HRESULT hrMajor = native->GetGUID(MF_MT_MAJOR_TYPE, &major);
+        native->Release();
+        if (FAILED(hrMajor)) {
+            continue;
+        }
+        if (major != MFMediaType_Video) {
+            reader->SetStreamSelection(i, FALSE);
+        }
+    }
+}
+
 void mfStartupAddRef()
 {
     if (g_mfStartupRef++ == 0) {
@@ -155,6 +197,20 @@ std::wstring pathToFileUrl(const std::string& utf8Path)
         out += static_cast<wchar_t>(static_cast<unsigned char>(c));
     }
     return out;
+}
+
+IMFAttributes* createSourceReaderAttributes()
+{
+    IMFAttributes* attr = nullptr;
+    if (FAILED(MFCreateAttributes(&attr, 8))) {
+        return nullptr;
+    }
+    // Prefer DXVA/D3D decoder MFTs when available (output may still be system memory for IMFSourceReader).
+    if (FAILED(attr->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE))) {
+        attr->Release();
+        return nullptr;
+    }
+    return attr;
 }
 
 bool configureOutputType(IMFSourceReader* reader, const GUID& subtype)
@@ -319,10 +375,8 @@ struct ProbeVideoEndResult {
 ProbeVideoEndResult probeVideoEndSec(IMFSourceReader* reader)
 {
     ProbeVideoEndResult out;
-    HRESULT hr = reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
-    if (FAILED(hr)) {
-        reader->Flush((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-    }
+    HRESULT hr = S_OK;
+    flushSourceReaderVideoFirst(reader);
 
     PROPVARIANT var;
     PropVariantInit(&var);
@@ -405,10 +459,7 @@ ProbeVideoEndResult probeVideoEndSec(IMFSourceReader* reader)
         sample->Release();
     }
 
-    hr = reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
-    if (FAILED(hr)) {
-        reader->Flush((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-    }
+    flushSourceReaderVideoFirst(reader);
     PropVariantInit(&var);
     var.vt = VT_I8;
     var.hVal.QuadPart = 0;
@@ -744,6 +795,8 @@ bool MFVideoReader::open(const std::string& utf8Path)
     LARGE_INTEGER t1;
     QueryPerformanceCounter(&t0);
 
+    IMFAttributes* srAttr = createSourceReaderAttributes();
+    const bool hwTransformsAttrRequested = (srAttr != nullptr);
     IMFSourceReader* reader = nullptr;
     HRESULT hr = E_FAIL;
     const std::wstring fullWide = utf8PathToFullPathWide(utf8Path);
@@ -752,19 +805,31 @@ bool MFVideoReader::open(const std::string& utf8Path)
         hr = MFCreateFile(MF_ACCESSMODE_READ, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_FILEFLAGS_NONE,
             fullWide.c_str(), &byteStream);
         if (SUCCEEDED(hr) && byteStream) {
-            hr = MFCreateSourceReaderFromByteStream(byteStream, nullptr, &reader);
+            hr = MFCreateSourceReaderFromByteStream(byteStream, srAttr, &reader);
+            if (FAILED(hr) && srAttr) {
+                hr = MFCreateSourceReaderFromByteStream(byteStream, nullptr, &reader);
+            }
             byteStream->Release();
         }
     }
     if (FAILED(hr) || !reader) {
         const std::wstring url = pathToFileUrl(utf8Path);
-        hr = MFCreateSourceReaderFromURL(url.c_str(), nullptr, &reader);
+        hr = MFCreateSourceReaderFromURL(url.c_str(), srAttr, &reader);
+        if (FAILED(hr) && srAttr) {
+            hr = MFCreateSourceReaderFromURL(url.c_str(), nullptr, &reader);
+        }
+    }
+    if (srAttr) {
+        srAttr->Release();
+        srAttr = nullptr;
     }
     if (FAILED(hr) || !reader) {
         LOGE("MFCreateSourceReader (file/URL) failed: 0x{:x}", static_cast<unsigned>(hr));
         mfStartupRelease();
         return false;
     }
+
+    disableNonVideoSourceReaderStreams(reader);
 
     m_reader = reader;
     QueryPerformanceCounter(&t1);
@@ -865,8 +930,9 @@ bool MFVideoReader::open(const std::string& utf8Path)
     QueryPerformanceCounter(&tOpenEnd);
     LOGI(
         "MFVideoReader open \"{}\": total {:.2f} ms (mfCreate {:.2f}, cfg {:.2f}, meta {:.2f}, firstDecode "
-        "{:.2f}) nv12Gpu={} durationReliable={} durationSec={:.6f} skipLazyStreamProbe={}",
+        "{:.2f}) nv12Gpu={} hwTransformsAttr={} durationReliable={} durationSec={:.6f} skipLazyStreamProbe={}",
         utf8Path, qpcMs(tOpenStart, tOpenEnd), msMfCreate, msCfg, msMeta, msFirstDecode, m_gpuNv12Path,
+        hwTransformsAttrRequested,
         m_durationReliable, m_durationSec, m_skipLazyStreamProbe);
     if (m_gpuNv12Path) {
         m_nv12DiagLogFrames = 3;
@@ -946,10 +1012,21 @@ bool MFVideoReader::lazyProbePresentationDuration()
     return true;
 }
 
-void MFVideoReader::seek(double seconds)
+void MFVideoReader::setPipelineTimingLog(bool on)
+{
+    m_logPipelineTiming = on;
+}
+
+void MFVideoReader::seek(double seconds, bool flushStreams)
 {
     if (!m_reader) {
         return;
+    }
+    LARGE_INTEGER tSeek0 {};
+    LARGE_INTEGER tAfterFlush {};
+    LARGE_INTEGER tSeek1 {};
+    if (m_logPipelineTiming) {
+        QueryPerformanceCounter(&tSeek0);
     }
     IMFSourceReader* reader = static_cast<IMFSourceReader*>(m_reader);
     constexpr double kMaxSeekSec = 86400.0 * 366.0 * 50.0;
@@ -958,13 +1035,28 @@ void MFVideoReader::seek(double seconds)
         seconds = std::min(seconds, seekEndCapSec(m_durationSec, m_frameDurationSec));
     }
 
-    // Flush all streams so audio/subtitle queues do not leave the reader out of sync after a seek.
-    HRESULT hr = reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
-    if (FAILED(hr)) {
-        hr = reader->Flush((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-        if (FAILED(hr)) {
-            LOGW("IMFSourceReader::Flush failed: 0x{:x}", static_cast<unsigned>(hr));
+    const double pos0 = m_positionSec;
+    constexpr double kTimeTol = 1.0 / 240.0;
+    // Without Flush, SetCurrentPosition can block ~1s; forward within this window is cheaper via ReadSample.
+    constexpr double kForwardCatchupSec = 1.35;
+    const bool backward = seconds < pos0 - kTimeTol;
+    const bool effectiveFlush = flushStreams || backward;
+
+    if (!flushStreams && !backward && seconds >= pos0 - kTimeTol && seconds <= pos0 + kForwardCatchupSec) {
+        if (m_logPipelineTiming) {
+            QueryPerformanceCounter(&tSeek1);
+            m_lastSeekFlushMs = 0.f;
+            m_lastSeekSetPosMs = 0.f;
+            m_lastSeekMs = static_cast<float>(qpcMs(tSeek0, tSeek1));
         }
+        return;
+    }
+
+    if (effectiveFlush) {
+        flushSourceReaderVideoFirst(reader);
+    }
+    if (m_logPipelineTiming) {
+        QueryPerformanceCounter(&tAfterFlush);
     }
 
     const double hnsF = seconds * 10000000.0;
@@ -979,13 +1071,20 @@ void MFVideoReader::seek(double seconds)
     PropVariantInit(&var);
     var.vt = VT_I8;
     var.hVal.QuadPart = hns;
-    hr = reader->SetCurrentPosition(GUID_NULL, var);
+    HRESULT hr = reader->SetCurrentPosition(GUID_NULL, var);
     PropVariantClear(&var);
     if (FAILED(hr)) {
         LOGD("SetCurrentPosition failed: 0x{:x}", static_cast<unsigned>(hr));
     }
 
     m_positionSec = seconds;
+    if (m_logPipelineTiming) {
+        QueryPerformanceCounter(&tSeek1);
+        m_lastSeekFlushMs =
+            effectiveFlush ? static_cast<float>(qpcMs(tSeek0, tAfterFlush)) : 0.f;
+        m_lastSeekSetPosMs = static_cast<float>(qpcMs(tAfterFlush, tSeek1));
+        m_lastSeekMs = static_cast<float>(qpcMs(tSeek0, tSeek1));
+    }
 }
 
 bool MFVideoReader::decodeFrame()
@@ -1038,10 +1137,17 @@ bool MFVideoReader::decodeFrame()
     return MFVideoReaderDecodeDetail::finalize(*this, sample, ts);
 }
 
-bool MFVideoReader::decodeFrameThrough(double targetSec)
+bool MFVideoReader::decodeFrameThrough(double targetSec, int maxReadSamplesCap)
 {
     if (!m_reader || m_width <= 0 || m_height <= 0) {
         return false;
+    }
+    LARGE_INTEGER tDec0 {};
+    LARGE_INTEGER tDec1 {};
+    if (m_logPipelineTiming) {
+        QueryPerformanceCounter(&tDec0);
+        m_lastDecodeThroughReads = 0;
+        m_lastDecodeThroughHitCap = false;
     }
     IMFSourceReader* reader = static_cast<IMFSourceReader*>(m_reader);
 
@@ -1069,7 +1175,10 @@ bool MFVideoReader::decodeFrameThrough(double targetSec)
     const double spanForIterBudget =
         (m_durationSec > kDurationEpsilonSec) ? m_durationSec : (std::max)(targetSec, 0.0);
     const int kBudget = static_cast<int>(spanForIterBudget * 130.0 + 2048.0);
-    const int kMaxReadIterations = (std::min)(200000, (std::max)(16384, kBudget));
+    int kMaxReadIterations = (std::min)(200000, (std::max)(16384, kBudget));
+    if (maxReadSamplesCap > 0) {
+        kMaxReadIterations = (std::min)(kMaxReadIterations, maxReadSamplesCap);
+    }
     while (readIterations < kMaxReadIterations) {
         ++readIterations;
         if (sample) {
@@ -1088,13 +1197,29 @@ bool MFVideoReader::decodeFrameThrough(double targetSec)
             if (hold) {
                 hold->Release();
             }
+            if (m_logPipelineTiming) {
+                QueryPerformanceCounter(&tDec1);
+                m_lastDecodeThroughMs = static_cast<float>(qpcMs(tDec0, tDec1));
+                m_lastDecodeThroughReads = readIterations;
+            }
             return false;
         }
         if (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
             if (hold) {
-                return MFVideoReaderDecodeDetail::finalize(*this, hold, holdReaderTs);
+                const bool ok = MFVideoReaderDecodeDetail::finalize(*this, hold, holdReaderTs);
+                if (m_logPipelineTiming) {
+                    QueryPerformanceCounter(&tDec1);
+                    m_lastDecodeThroughMs = static_cast<float>(qpcMs(tDec0, tDec1));
+                    m_lastDecodeThroughReads = readIterations;
+                }
+                return ok;
             }
             m_positionSec = m_durationSec > 0.0 ? m_durationSec : m_positionSec;
+            if (m_logPipelineTiming) {
+                QueryPerformanceCounter(&tDec1);
+                m_lastDecodeThroughMs = static_cast<float>(qpcMs(tDec0, tDec1));
+                m_lastDecodeThroughReads = readIterations;
+            }
             return false;
         }
         if (streamFlags & MF_SOURCE_READERF_STREAMTICK) {
@@ -1115,7 +1240,13 @@ bool MFVideoReader::decodeFrameThrough(double targetSec)
                 hold->Release();
                 hold = nullptr;
             }
-            return MFVideoReaderDecodeDetail::finalize(*this, sample, ts);
+            const bool ok = MFVideoReaderDecodeDetail::finalize(*this, sample, ts);
+            if (m_logPipelineTiming) {
+                QueryPerformanceCounter(&tDec1);
+                m_lastDecodeThroughMs = static_cast<float>(qpcMs(tDec0, tDec1));
+                m_lastDecodeThroughReads = readIterations;
+            }
+            return ok;
         }
 
         if (hold) {
@@ -1128,9 +1259,23 @@ bool MFVideoReader::decodeFrameThrough(double targetSec)
 
     if (hold) {
         LOGW("decodeFrameThrough: hit iteration cap, using last sample before target");
-        return MFVideoReaderDecodeDetail::finalize(*this, hold, holdReaderTs);
+        if (m_logPipelineTiming) {
+            m_lastDecodeThroughHitCap = true;
+        }
+        const bool ok = MFVideoReaderDecodeDetail::finalize(*this, hold, holdReaderTs);
+        if (m_logPipelineTiming) {
+            QueryPerformanceCounter(&tDec1);
+            m_lastDecodeThroughMs = static_cast<float>(qpcMs(tDec0, tDec1));
+            m_lastDecodeThroughReads = readIterations;
+        }
+        return ok;
     }
     LOGW("decodeFrameThrough: no video sample after {} iterations", readIterations);
+    if (m_logPipelineTiming) {
+        QueryPerformanceCounter(&tDec1);
+        m_lastDecodeThroughMs = static_cast<float>(qpcMs(tDec0, tDec1));
+        m_lastDecodeThroughReads = readIterations;
+    }
     return false;
 }
 
@@ -1192,7 +1337,7 @@ bool MFVideoReader::isOpen() const
     return false;
 }
 
-void MFVideoReader::seek(double)
+void MFVideoReader::seek(double, bool)
 {
 }
 
@@ -1201,7 +1346,7 @@ bool MFVideoReader::decodeFrame()
     return false;
 }
 
-bool MFVideoReader::decodeFrameThrough(double)
+bool MFVideoReader::decodeFrameThrough(double, int)
 {
     return false;
 }
@@ -1209,6 +1354,10 @@ bool MFVideoReader::decodeFrameThrough(double)
 bool MFVideoReader::lazyProbePresentationDuration()
 {
     return false;
+}
+
+void MFVideoReader::setPipelineTimingLog(bool)
+{
 }
 
 }  // namespace baktsiu

@@ -1,0 +1,52 @@
+General
+Unique ID                                : 255277212635433384226012168941997942705 (0xC00C9A50AB8F4872BC67DCBE185C67B1)
+Complete name                            : C:\Users\WXP\Downloads\test\3.mkv
+Format                                   : Matroska
+Format version                           : Version 4
+File size                                : 622 MiB
+Duration                                 : 1 h 2 min
+Overall bit rate                         : 1 396 kb/s
+Frame rate                               : 24.000 FPS
+Encoded date                             : 2025-05-19 23:57:23 UTC
+Writing application                      : HandBrake 1.9.2 2025022300
+Writing library                          : Lavf61.7.100
+ErrorDetectionType                       : Per level 1
+
+Video
+ID                                       : 1
+Format                                   : HEVC
+Format/Info                              : High Efficiency Video Coding
+Format profile                           : Main 10@L4@Main
+Codec ID                                 : V_MPEGH/ISO/HEVC
+Duration                                 : 1 h 2 min
+Width                                    : 1 920 pixels
+Height                                   : 1 080 pixels
+Display aspect ratio                     : 16:9
+Frame rate mode                          : Constant
+Frame rate                               : 24.000 FPS
+Color space                              : YUV
+Chroma subsampling                       : 4:2:0
+Bit depth                                : 10 bits
+Default                                  : Yes
+Forced                                   : No
+Color range                              : Limited
+Color primaries                          : BT.709
+Transfer characteristics                 : BT.709
+Matrix coefficients                      : BT.709
+
+Audio
+ID                                       : 2
+Format                                   : AAC LC
+Format/Info                              : Advanced Audio Codec Low Complexity
+Codec ID                                 : A_AAC-2
+Duration                                 : 1 h 2 min
+Channel(s)                               : 2 channels
+Channel layout                           : L R
+Sampling rate                            : 48.0 kHz
+Frame rate                               : 46.875 FPS (1024 SPF)
+Compression mode                         : Lossy
+Title                                    : Stereo
+Language                                 : English
+Default                                  : Yes
+Forced                                   : No
+

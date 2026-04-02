@@ -245,7 +245,10 @@ private:
 
     void    clampVideoCompositionT();
 
-    void    syncVideoDecodersToCompositionT();
+    // maxDecodeReadCapPerStream 0 = full decodeFrameThrough budget; >0 caps ReadSample count per stream (scrub preview).
+    void    syncVideoDecodersToCompositionT(int maxDecodeReadCapPerStream = 0);
+
+    void    resetVideoDecoderSyncCache();
 
     // Video scrub: direction -1 = earlier, +1 = later.
     void    stepVideoScrubFiveSeconds(int direction);
@@ -347,6 +350,14 @@ private:
     double      mVideoCompositionT = 0.0;
     double      mVideoStartL = 0.0;
     double      mVideoStartR = 0.0;
+    // Last targets used in syncVideoDecodersToCompositionT (skip redundant seek/decode when unchanged).
+    double      mVideoLastSyncedTargetMediaL = -1.0;
+    double      mVideoLastSyncedTargetMediaR = -1.0;
+    // ImGui::GetTime() of last scrub seek+decode; throttles expensive MF work while dragging the slider.
+    double      mVideoLastScrubDecodeTime = -1.0e9;
+    bool        mVideoLogPipelineTiming = false;
+    float       mVideoDbgLastUploadLMs = 0.f;
+    float       mVideoDbgLastUploadRMs = 0.f;
     // Presentation-only left/right swap for instant switching while playing.
     // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
     // remain in their original slots (mVideoReader/mVideoReaderB).
