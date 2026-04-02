@@ -27,6 +27,11 @@ uniform vec4    uCharUvRanges[11];
 uniform vec4    uCharUvXforms[11];
 uniform bool    uEnablePixelHighlight;
 uniform bool    uApplyToneMapping;
+// Vertical flip (invert displayed image along horizontal center) per physical texture.
+uniform bool    uFlipImage1;
+uniform bool    uFlipImage2;
+uniform bool    uFlipImage1H;
+uniform bool    uFlipImage2H;
 
 in  vec2 vUV;
 out vec4 oColor;
@@ -491,6 +496,17 @@ vec3 drawRGBValues(vec2 wh, vec2 offset, float imageScale, vec3 linearColor, vec
     return mix(displayColor, matteColor, opacity);
 }
 
+vec2 applyImageFlipUv(vec2 uv, bool flipH, bool flipV)
+{
+    if (flipH) {
+        uv.x = 1.0 - uv.x;
+    }
+    if (flipV) {
+        uv.y = 1.0 - uv.y;
+    }
+    return uv;
+}
+
 //! @param wh Pixel coordinates in window.
 //! @param offset Image position in window coordinates.
 //! @param imageSize Scaled image size for display.
@@ -498,8 +514,11 @@ vec3 drawRGBValues(vec2 wh, vec2 offset, float imageScale, vec3 linearColor, vec
 //! @param image1 Texture sampler of left image.
 //! @param image2 Texture sampler of right image.
 //! @param uvOffset The relative UV offset for image2.
+//! @param flipSampler1 Vertical flip for the first sampler (image1 argument).
+//! @param flipSampler2 Vertical flip for the second sampler (image2 argument).
 vec4 showImage(vec2 wh, vec2 offset, vec2 imageSize, vec2 cursorPos,
-    in sampler2D image1, in sampler2D image2, vec2 uvOffset)
+    in sampler2D image1, in sampler2D image2, vec2 uvOffset, bool flipSampler1, bool flipSampler2,
+    bool flipSampler1H, bool flipSampler2H)
 {
     vec4 result = vec4(0.0);
 
@@ -510,8 +529,8 @@ vec4 showImage(vec2 wh, vec2 offset, vec2 imageSize, vec2 cursorPos,
     }
 
     vec2 refPx = (wh - offset) / uImageScale;
-    vec2 uv1 = refPxToUvContain(refPx, uRefImageSize, uTex1Size);
-    vec2 uv2 = refPxToUvContain(refPx, uRefImageSize, uTex2Size) + uvOffset;
+    vec2 uv1 = applyImageFlipUv(refPxToUvContain(refPx, uRefImageSize, uTex1Size), flipSampler1H, flipSampler1);
+    vec2 uv2 = applyImageFlipUv(refPxToUvContain(refPx, uRefImageSize, uTex2Size) + uvOffset, flipSampler2H, flipSampler2);
 
     bool inDiffMode = (uPixelMarkerFlags & 0x3) != 0;
     bool enableHeatMap = (uPixelMarkerFlags & 0x2) >> 1 != 0;
@@ -579,10 +598,12 @@ vec4 renderSideBySide(vec2 wh, vec4 offset, vec2 relativeOffset, vec2 cursorPos,
     vec2 disp1 = refContainDisp(uRefImageSize, uTex1Size);
     vec2 deltaUV2 = round(relativeOffset) / max(disp2 * uImageScale, vec2(1e-6));
     vec2 deltaUV1 = round(relativeOffset) / max(disp1 * uImageScale, vec2(1e-6));
-    vec4 color1 = showImage(wh, offset.xy, imageSize, leftCursorPos, uImage1, uImage2, -deltaUV2);
+    vec4 color1 = showImage(wh, offset.xy, imageSize, leftCursorPos, uImage1, uImage2, -deltaUV2,
+        uFlipImage1, uFlipImage2, uFlipImage1H, uFlipImage2H);
 
     wh.x = round(wh.x - splitPos * uWindowSize.x + 0.5) - 0.5;
-    vec4 color2 = showImage(wh, offset.zw, imageSize, rightCursorPos, uImage2, uImage1, deltaUV1);
+    vec4 color2 = showImage(wh, offset.zw, imageSize, rightCursorPos, uImage2, uImage1, deltaUV1,
+        uFlipImage2, uFlipImage1, uFlipImage2H, uFlipImage1H);
 
     vec4 result = mix(color1, color2, vec4(uv.x > splitPos));
 
@@ -621,8 +642,8 @@ void main()
     }
 
     vec2 refPx = (wh - uOffset) / uImageScale;
-    vec2 uv1 = refPxToUvContain(refPx, uRefImageSize, uTex1Size);
-    vec2 uv2 = refPxToUvContain(refPx, uRefImageSize, uTex2Size);
+    vec2 uv1 = applyImageFlipUv(refPxToUvContain(refPx, uRefImageSize, uTex1Size), uFlipImage1H, uFlipImage1);
+    vec2 uv2 = applyImageFlipUv(refPxToUvContain(refPx, uRefImageSize, uTex2Size), uFlipImage2H, uFlipImage2);
     bool inside1 = uvInsideImage(uv1);
     bool inside2 = uvInsideImage(uv2);
     vec3 raw1 = inside1 ? texture(uImage1, uv1).rgb : vec3(0.0);

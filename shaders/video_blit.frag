@@ -29,6 +29,10 @@ uniform vec2 uVideoOffsetExtra;
 uniform vec2 uVideoRelativeOffset;
 uniform float uVideoImageScale;
 uniform int uVideoSideBySide;
+uniform bool uFlipVideoL;
+uniform bool uFlipVideoR;
+uniform bool uFlipVideoLH;
+uniform bool uFlipVideoRH;
 
 in vec2 vUV;
 out vec4 oColor;
@@ -359,26 +363,37 @@ vec2 refPxToUvContain(vec2 refPx, vec2 refWH, vec2 texWH)
     return (refPx - ox) / max(disp, vec2(1e-6));
 }
 
-vec4 sampleVideoZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, vec2 refSz, vec2 texSz)
+vec2 videoTexGlUv(vec2 uvLogical, bool flipHorizontal, bool flipVertical)
+{
+    if (flipHorizontal) {
+        uvLogical.x = 1.0 - uvLogical.x;
+    }
+    float yGl = flipVertical ? uvLogical.y : (1.0 - uvLogical.y);
+    return vec2(uvLogical.x, yGl);
+}
+
+vec4 sampleVideoZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, vec2 refSz, vec2 texSz,
+    bool flipHorizontal, bool flipVertical)
 {
     vec2 refPx = (wh - offset) / max(imageScale, 1e-5);
     vec2 uv = refPxToUvContain(refPx, refSz, texSz);
     if (!uvInsideImage(uv)) {
         return kLetterbox;
     }
-    vec4 t = texture(tex, vec2(uv.x, 1.0 - uv.y));
+    vec4 t = texture(tex, videoTexGlUv(uv, flipHorizontal, flipVertical));
     t.rgb = mapVideoToDisplay(t.rgb);
     return t;
 }
 
-bool videoFetchEncZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, vec2 refSz, vec2 texSz, out vec3 encRgb)
+bool videoFetchEncZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, vec2 refSz, vec2 texSz,
+    bool flipHorizontal, bool flipVertical, out vec3 encRgb)
 {
     vec2 refPx = (wh - offset) / max(imageScale, 1e-5);
     vec2 uv = refPxToUvContain(refPx, refSz, texSz);
     if (!uvInsideImage(uv)) {
         return false;
     }
-    encRgb = texture(tex, vec2(uv.x, 1.0 - uv.y)).rgb;
+    encRgb = texture(tex, videoTexGlUv(uv, flipHorizontal, flipVertical)).rgb;
     return true;
 }
 
@@ -395,7 +410,8 @@ void main()
     vec3 checkerBg = getCheckerColor(vUV, uWindowSize);
 
     if (uCompareMode == 0) {
-        oColor = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize);
+        oColor = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize,
+            uFlipVideoLH, uFlipVideoL);
         return;
     }
 
@@ -425,10 +441,10 @@ void main()
                     okL = uvInsideImage(uvL);
                     okR = uvInsideImage(uvR);
                     if (okL) {
-                        encL = texture(uVideo, vec2(uvL.x, 1.0 - uvL.y)).rgb;
+                        encL = texture(uVideo, videoTexGlUv(uvL, uFlipVideoLH, uFlipVideoL)).rgb;
                     }
                     if (okR) {
-                        encR = texture(uVideoR, vec2(uvR.x, 1.0 - uvR.y)).rgb;
+                        encR = texture(uVideoR, videoTexGlUv(uvR, uFlipVideoRH, uFlipVideoR)).rgb;
                     }
                 } else {
                     vec2 whR = wh;
@@ -441,10 +457,10 @@ void main()
                     okL = uvInsideImage(uvL);
                     okR = uvInsideImage(uvR);
                     if (okL) {
-                        encL = texture(uVideo, vec2(uvL.x, 1.0 - uvL.y)).rgb;
+                        encL = texture(uVideo, videoTexGlUv(uvL, uFlipVideoLH, uFlipVideoL)).rgb;
                     }
                     if (okR) {
-                        encR = texture(uVideoR, vec2(uvR.x, 1.0 - uvR.y)).rgb;
+                        encR = texture(uVideoR, videoTexGlUv(uvR, uFlipVideoRH, uFlipVideoR)).rgb;
                     }
                 }
                 if (!okL || !okR) {
@@ -461,10 +477,12 @@ void main()
                     oColor.rgb = outputTransform(oColor.rgb, uOutTransformType, mix(uDisplayGamma, 1.0, enableHeatMap));
                 }
             } else {
-                vec4 cL = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize);
+                vec4 cL = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize,
+                    uFlipVideoLH, uFlipVideoL);
                 vec2 whR = wh;
                 whR.x = round(wh.x - uSplitPos * uWindowSize.x + 0.5) - 0.5;
-                vec4 cR = sampleVideoZoomed(uVideoR, whR, uVideoOffsetExtra, uVideoImageScale, uVideoRefSize, uVideoSizeR);
+                vec4 cR = sampleVideoZoomed(uVideoR, whR, uVideoOffsetExtra, uVideoImageScale, uVideoRefSize, uVideoSizeR,
+                    uFlipVideoRH, uFlipVideoR);
                 oColor = vUV.x < uSplitPos ? cL : cR;
             }
             if (onSplit) {
@@ -482,8 +500,10 @@ void main()
         }
         vec3 encL;
         vec3 encR;
-        bool okL = videoFetchEncZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize, encL);
-        bool okR = videoFetchEncZoomed(uVideoR, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSizeR, encR);
+        bool okL = videoFetchEncZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize,
+            uFlipVideoLH, uFlipVideoL, encL);
+        bool okR = videoFetchEncZoomed(uVideoR, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSizeR,
+            uFlipVideoRH, uFlipVideoR, encR);
         if (!okL || !okR) {
             oColor = vec4(checkerBg, 1.0);
             return;
@@ -505,7 +525,9 @@ void main()
         return;
     }
 
-    vec4 cLa = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize);
-    vec4 cRa = sampleVideoZoomed(uVideoR, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSizeR);
+    vec4 cLa = sampleVideoZoomed(uVideo, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSize,
+        uFlipVideoLH, uFlipVideoL);
+    vec4 cRa = sampleVideoZoomed(uVideoR, wh, uVideoOffset, uVideoImageScale, uVideoRefSize, uVideoSizeR,
+        uFlipVideoRH, uFlipVideoR);
     oColor = local.x < spx ? cLa : cRa;
 }

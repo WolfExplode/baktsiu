@@ -356,6 +356,30 @@ void footerFileSizeHuman(
 namespace baktsiu
 {
 
+static bool refPxToPixel(Vec2f refPx, Vec2f refSz, Vec2f texSz, bool flipH, bool flipV, Vec2f& outPx)
+{
+    const Vec2f safeR = glm::max(refSz, Vec2f(1.f));
+    const Vec2f safeT = glm::max(texSz, Vec2f(1.f));
+    const float sc = (std::min)(safeR.x / safeT.x, safeR.y / safeT.y);
+    const Vec2f disp = safeT * sc;
+    const Vec2f ox = (safeR - disp) * 0.5f;
+    Vec2f uv((refPx.x - ox.x) / (std::max)(disp.x, 1e-6f), (refPx.y - ox.y) / (std::max)(disp.y, 1e-6f));
+    if (uv.x < -1e-4f || uv.x > 1.f + 1e-4f || uv.y < -1e-4f || uv.y > 1.f + 1e-4f) {
+        return false;
+    }
+    if (flipH) {
+        uv.x = 1.0f - uv.x;
+    }
+    if (flipV) {
+        uv.y = 1.0f - uv.y;
+    }
+    outPx.x = std::floor(uv.x * texSz.x);
+    outPx.y = std::floor(uv.y * texSz.y);
+    outPx.x = glm::clamp(outPx.x, 0.f, (std::max)(texSz.x - 1.f, 0.f));
+    outPx.y = glm::clamp(outPx.y, 0.f, (std::max)(texSz.y - 1.f, 0.f));
+    return true;
+}
+
 const char* App::kImagePropWindowName = "ImagePropWindow";
 const char* App::kImageRemoveDlgTitle = "Bak Tsiu##RemoveImage";
 const char* App::kClearImagesDlgTitle = "Bak Tsiu##ClearImageLayers";
@@ -900,6 +924,10 @@ void App::run(CompositeFlags initFlags)
             mPresentShader.setUniform("uSplitPos", enableCompareView ? mViewSplitPos : 1.0f);
             mPresentShader.setUniform("uDisplayGamma", mDisplayGamma);
             mPresentShader.setUniform("uApplyToneMapping", mEnableToneMapping);
+            mPresentShader.setUniform("uFlipImage1", mFlipPresentMediaVert[0]);
+            mPresentShader.setUniform("uFlipImage2", enableCompareView ? mFlipPresentMediaVert[1] : false);
+            mPresentShader.setUniform("uFlipImage1H", mFlipPresentMediaHorz[0]);
+            mPresentShader.setUniform("uFlipImage2H", enableCompareView ? mFlipPresentMediaHorz[1] : false);
             mPresentShader.setUniform("uCharUvRanges", mCharUvRanges);
             mPresentShader.setUniform("uCharUvXforms", mCharUvXforms);
             mPresentShader.setUniform("uPixelBorderHighlightColor", mPixelBorderHighlightColor);
@@ -1622,6 +1650,45 @@ void    App::initToolbar()
     if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Side by Side View"); }
 
     ImGui::SameLine();
+#if defined(USE_VIDEO)
+    const bool canFlipMedia =
+        !mVideoMode ? (mTopImageIndex >= 0) : (mVideoReader && mVideoReader->isOpen());
+#else
+    const bool canFlipMedia = mTopImageIndex >= 0;
+#endif
+    if (canFlipMedia) {
+        auto drawFlipAxisButton = [&](const char* label, bool* leftState, bool* rightState, const char* tooltip) {
+            const bool flipActive = *leftState || *rightState;
+            if (flipActive) {
+                ImGui::PushStyleColor(ImGuiCol_Button, g.Style.Colors[ImGuiCol_ButtonActive]);
+            }
+            ImGui::Button(label, buttonSize);
+            const bool flipLeft = ImGui::IsItemClicked(0);
+            const bool flipRight = ImGui::IsItemClicked(1);
+            if (flipActive) {
+                ImGui::PopStyleColor(1);
+            }
+            if (flipLeft) {
+                *leftState ^= true;
+            }
+            if (flipRight) {
+                *rightState ^= true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s\nLMB: left media\nRMB: right media", tooltip);
+            }
+        };
+
+        drawFlipAxisButton(ICON_FA_ARROWS_ALT_V "##flipVert", &mFlipPresentMediaVert[0],
+            &mFlipPresentMediaVert[1], "Vertical flip");
+        ImGui::SameLine();
+        drawFlipAxisButton(ICON_FA_ARROWS_ALT_H "##flipHorz", &mFlipPresentMediaHorz[0],
+            &mFlipPresentMediaHorz[1], "Horizontal flip");
+        ImGui::SameLine();
+    } else {
+        ImGui::SameLine();
+    }
+
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, Vec2f(5.0f));
     ImGui::PushItemWidth(comboMenuWidth);
     const char* outTransformTypes[] = { "sRGB", "P3 D65", "BT.2020" };
@@ -2180,6 +2247,13 @@ void App::initFooter()
 #if defined(USE_VIDEO)
     const bool videoFooterDims = mVideoMode && mVideoReader && mVideoReader->isOpen();
     if (videoFooterDims) {
+        auto footerVideoDurationStr = [](const MpvGlPlayer* p, char* out, size_t outSz) {
+            if (!p || !p->isOpen() || !p->hasReliableDuration() || p->durationSec() <= 0.001) {
+                std::snprintf(out, outSz, "?");
+            } else {
+                formatVideoHms(p->durationSec(), out, outSz);
+            }
+        };
         if (videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen()) {
             const bool dispSwap = mVideoSwapPresentationLR;
             const MpvGlPlayer* leftP = dispSwap ? mVideoReaderB.get() : mVideoReader.get();
@@ -2196,22 +2270,26 @@ void App::initFooter()
             char szRight[40];
             footerFileSizeHuman(pathLeft, cachePathVL, cacheBytesVL, szLeft, sizeof szLeft);
             footerFileSizeHuman(pathRight, cachePathVR, cacheBytesVR, szRight, sizeof szRight);
+            char durLeft[40];
+            char durRight[40];
+            footerVideoDurationStr(leftP, durLeft, sizeof durLeft);
+            footerVideoDurationStr(rightP, durRight, sizeof durRight);
 
             ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
-            ImGui::Text("%.0f x %.0f · %s", leftSz.x, leftSz.y, szLeft);
+            ImGui::Text("%.0f x %.0f · %s · %s", leftSz.x, leftSz.y, durLeft, szLeft);
             Vec2f lcoords;
             if (getCompareSideVideoPixelAtMouse(g.IO, 0, lcoords)) {
                 ImGui::SameLine();
                 ImGui::Text("(%.0f, %.0f)", lcoords.x, leftSz.y - lcoords.y - 1.0f);
             }
 
-            char rbuf[192];
+            char rbuf[256];
             Vec2f rcoords;
             if (getCompareSideVideoPixelAtMouse(g.IO, 1, rcoords)) {
-                sprintf_s(rbuf, sizeof rbuf, "(%.0f, %.0f) · %.0f x %.0f · %s", rcoords.x,
-                    rightSz.y - rcoords.y - 1.0f, rightSz.x, rightSz.y, szRight);
+                sprintf_s(rbuf, sizeof rbuf, "(%.0f, %.0f) · %.0f x %.0f · %s · %s", rcoords.x,
+                    rightSz.y - rcoords.y - 1.0f, rightSz.x, rightSz.y, durRight, szRight);
             } else {
-                sprintf_s(rbuf, sizeof rbuf, "%.0f x %.0f · %s", rightSz.x, rightSz.y, szRight);
+                sprintf_s(rbuf, sizeof rbuf, "%.0f x %.0f · %s · %s", rightSz.x, rightSz.y, durRight, szRight);
             }
             const float rtextW = ImGui::CalcTextSize(rbuf).x;
             ImGui::SameLine();
@@ -2222,9 +2300,11 @@ void App::initFooter()
             static std::int64_t cacheBytesVSingle = -1;
             char szV[40];
             footerFileSizeHuman(mVideoPathL, cachePathVSingle, cacheBytesVSingle, szV, sizeof szV);
+            char durV[40];
+            footerVideoDurationStr(mVideoReader.get(), durV, sizeof durV);
             const Vec2f imageSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
             ImGui::SameLine(g.Style.FramePadding.x + g.FontSize * 4.0f);
-            ImGui::Text("%.0f x %.0f · %s", imageSize.x, imageSize.y, szV);
+            ImGui::Text("%.0f x %.0f · %s · %s", imageSize.x, imageSize.y, durV, szV);
             Vec2f imageCoords;
             if (getSingleVideoPixelAtMouse(g.IO, imageCoords)) {
                 ImGui::SameLine();
@@ -3070,6 +3150,14 @@ bool App::getImageCoordinates(Vec2f viewportCoords, Vec2f& outImageCoords) const
         }
     }
 
+    if (!isOutsideImage && mTopImageIndex >= 0 && !inCompareMode() && !inSideBySideMode()) {
+        const Image* im = mImageList[mTopImageIndex].get();
+        if (im && refPxToPixel(outImageCoords, im->size(), im->size(),
+                mFlipPresentMediaHorz[0], mFlipPresentMediaVert[0], outImageCoords)) {
+            return true;
+        }
+    }
+
     outImageCoords = glm::floor(outImageCoords);
 
     return !isOutsideImage;
@@ -3132,17 +3220,13 @@ bool App::getCompareSideImagePixelAtMouse(Vec2f imguiMousePos, int side, Vec2f& 
     const float sc = (std::min)(refSz.x / (std::max)(actual.x, 1e-6f), refSz.y / (std::max)(actual.y, 1e-6f));
     const Vec2f disp(actual.x * sc, actual.y * sc);
     const Vec2f ox = (refSz - disp) * 0.5f;
-    const Vec2f uv((refPx.x - ox.x) / (std::max)(disp.x, 1e-6f), (refPx.y - ox.y) / (std::max)(disp.y, 1e-6f));
+    Vec2f uv((refPx.x - ox.x) / (std::max)(disp.x, 1e-6f), (refPx.y - ox.y) / (std::max)(disp.y, 1e-6f));
 
     if (uv.x < -1e-4f || uv.y < -1e-4f || uv.x > 1.0f + 1e-4f || uv.y > 1.0f + 1e-4f) {
         return false;
     }
 
-    outImagePx = glm::floor(uv * actual);
-    outImagePx.x = glm::clamp(outImagePx.x, 0.0f, glm::max(actual.x - 1.0f, 0.0f));
-    outImagePx.y = glm::clamp(outImagePx.y, 0.0f, glm::max(actual.y - 1.0f, 0.0f));
-
-    return true;
+    return refPxToPixel(refPx, refSz, actual, mFlipPresentMediaHorz[side], mFlipPresentMediaVert[side], outImagePx);
 }
 
 float App::getPropWindowWidth() const
@@ -3452,24 +3536,6 @@ bool videoContainPixelFromLocal(Vec2f localBL, Vec2f panelPx, Vec2f vidSize, Vec
     return true;
 }
 
-// Map reference-frame pixel (View image coords) to texture pixel; matches present.frag refPxToUvContain.
-bool videoPixelFromRefPx(Vec2f refPx, Vec2f refSz, Vec2f texSz, Vec2f& outPx)
-{
-    const Vec2f safeR = glm::max(refSz, Vec2f(1.f));
-    const Vec2f safeT = glm::max(texSz, Vec2f(1.f));
-    const float sc = (std::min)(safeR.x / safeT.x, safeR.y / safeT.y);
-    const Vec2f disp = safeT * sc;
-    const Vec2f ox = (safeR - disp) * 0.5f;
-    const Vec2f uv((refPx.x - ox.x) / (std::max)(disp.x, 1e-5f), (refPx.y - ox.y) / (std::max)(disp.y, 1e-5f));
-    if (uv.x < -1e-4f || uv.x > 1.f + 1e-4f || uv.y < -1e-4f || uv.y > 1.f + 1e-4f) {
-        return false;
-    }
-    outPx.x = std::floor(uv.x * texSz.x);
-    outPx.y = std::floor(uv.y * texSz.y);
-    outPx.x = glm::clamp(outPx.x, 0.f, (std::max)(texSz.x - 1.f, 0.f));
-    outPx.y = glm::clamp(outPx.y, 0.f, (std::max)(texSz.y - 1.f, 0.f));
-    return true;
-}
 }  // namespace
 
 Vec2f App::videoRefDisplaySizeForLayout() const
@@ -3598,7 +3664,7 @@ bool App::getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const
     }
     const Vec2f refSz = videoRefDisplaySizeForLayout();
     const Vec2f texSz(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
-    return videoPixelFromRefPx(refPx, refSz, texSz, outImagePx);
+    return refPxToPixel(refPx, refSz, texSz, mFlipPresentMediaHorz[0], mFlipPresentMediaVert[0], outImagePx);
 }
 
 bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const
@@ -3666,7 +3732,7 @@ bool App::getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& ou
     }
     const Vec2f texSz(sideP->displayWidthForAspect(), sideP->displayHeightForAspect());
     const Vec2f refSz = videoRefDisplaySizeForLayout();
-    return videoPixelFromRefPx(refPx, refSz, texSz, outImagePx);
+    return refPxToPixel(refPx, refSz, texSz, mFlipPresentMediaHorz[side], mFlipPresentMediaVert[side], outImagePx);
 }
 #endif  // USE_VIDEO
 
@@ -4621,6 +4687,10 @@ void App::renderVideoBlit(const ImGuiIO& io)
     mVideoBlitShader.setUniform("uPresentMode", mCurrentPresentMode);
     mVideoBlitShader.setUniform("uApplyToneMapping", mEnableToneMapping);
     mVideoBlitShader.setUniform("uPixelMarkerFlags", getPixelMarkerFlags());
+    mVideoBlitShader.setUniform("uFlipVideoL", mFlipPresentMediaVert[0]);
+    mVideoBlitShader.setUniform("uFlipVideoR", cmp ? mFlipPresentMediaVert[1] : false);
+    mVideoBlitShader.setUniform("uFlipVideoLH", mFlipPresentMediaHorz[0]);
+    mVideoBlitShader.setUniform("uFlipVideoRH", cmp ? mFlipPresentMediaHorz[1] : false);
     mVideoBlitShader.drawTriangle();
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, 0);

@@ -400,6 +400,10 @@ private:
     // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
     // remain in their original slots (mVideoReader/mVideoReaderB).
     bool        mVideoSwapPresentationLR = false;
+    // Vertical flip (invert along horizontal midline) for on-screen left / right media.
+    bool        mFlipPresentMediaVert[2] = {false, false};
+    // Horizontal flip (mirror along vertical midline) for on-screen left / right media.
+    bool        mFlipPresentMediaHorz[2] = {false, false};
     Shader      mVideoBlitShader;
     bool        mVideoShaderReady = false;
 };
