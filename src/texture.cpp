@@ -2,6 +2,12 @@
 
 #include <fstream>
 
+#if defined(_WIN32) && defined(_MSC_VER)
+// Without this, stbi__fopen uses fopen_s with the process ANSI code page. UTF-8 paths from
+// the file dialog or drag-and-drop (e.g. Japanese filenames) then fail to open.
+#define STBI_WINDOWS_UTF8
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
