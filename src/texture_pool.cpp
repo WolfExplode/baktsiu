@@ -67,7 +67,7 @@ TextureSPtr TexturePool::acquireTexture(const std::string& filepath)
         }
     }
 
-    TextureSPtr newTexture = std::make_shared<Texture>();
+    TextureSPtr newTexture = createTextureForFile(filepath);
 
     {
         // Create a load request and append to queue.

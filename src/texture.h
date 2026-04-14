@@ -40,19 +40,23 @@ public:
     Texture(const Texture&) = delete;
     Texture& operator=(const Texture&) = delete;
 
-    ~Texture();
+    virtual ~Texture();
 
     // Load pixel data from file.
-    bool    loadFromFile(const std::string& filepath);
+    virtual bool    loadFromFile(const std::string& filepath);
 
     // Reload file from previous path.
-    bool    reloadFile();
+    virtual bool    reloadFile();
 
     // Upload content to GPU.
-    bool    upload();
+    virtual bool    upload();
+
+    // Advance animated textures (deltaTimeSec in seconds).
+    // Default: no-op for still images.
+    virtual void    tick(float /*deltaTimeSec*/) {}
 
     // Release internal graphics resources.
-    void    release();
+    virtual void    release();
 
     // Return GL texture id.
     GLuint  id() const { return mTexId; }
@@ -67,7 +71,7 @@ public:
 
     inline const std::string& filepath() const { return mFilePath; }
 
-private:
+protected:
     std::string     mFilePath;
     std::string     mFileName;
 
@@ -85,6 +89,9 @@ private:
 
 using TextureSPtr = std::shared_ptr<Texture>;
 using TextureList = std::vector<TextureSPtr>;
+
+// Factory that returns a Texture implementation suitable for the file.
+TextureSPtr createTextureForFile(const std::string& filepath);
 
 
 // Texture object as render target.

@@ -1,5 +1,6 @@
 ﻿#include "texture.h"
 
+#include <algorithm>
 #include <fstream>
 
 #if defined(_WIN32) && defined(_MSC_VER)
@@ -21,6 +22,166 @@
 
 namespace baktsiu
 {
+
+class AnimatedGifTexture final : public Texture
+{
+public:
+    bool loadFromFile(const std::string& filepath) override
+    {
+        // Read file into memory so we can use stb's GIF API.
+        std::ifstream in(filepath, std::ios::binary);
+        if (!in) {
+            return false;
+        }
+        in.seekg(0, std::ios::end);
+        const std::streamoff sizeOff = in.tellg();
+        if (sizeOff <= 0) {
+            return false;
+        }
+        in.seekg(0, std::ios::beg);
+
+        std::vector<stbi_uc> bytes(static_cast<size_t>(sizeOff));
+        in.read(reinterpret_cast<char*>(bytes.data()), sizeOff);
+        if (!in) {
+            return false;
+        }
+
+        int* delays = nullptr;
+        int x = 0, y = 0, z = 0, comp = 0;
+        stbi_uc* allFrames = stbi_load_gif_from_memory(
+            bytes.data(), static_cast<int>(bytes.size()), &delays, &x, &y, &z, &comp, 4);
+        if (!allFrames || x <= 0 || y <= 0 || z <= 0) {
+            if (allFrames) {
+                stbi_image_free(allFrames);
+            }
+            if (delays) {
+                STBI_FREE(delays);
+            }
+            return false;
+        }
+
+        const size_t frameBytes = static_cast<size_t>(x) * static_cast<size_t>(y) * 4u;
+        mFrames.clear();
+        mFrames.reserve(static_cast<size_t>(z));
+        for (int i = 0; i < z; ++i) {
+            const stbi_uc* src = allFrames + static_cast<size_t>(i) * frameBytes;
+            mFrames.emplace_back(src, src + frameBytes);
+        }
+
+        mDelaysMs.assign(static_cast<size_t>(z), 0);
+        if (delays) {
+            for (int i = 0; i < z; ++i) {
+                // stb stores GIF delays as milliseconds.
+                const int d = delays[i];
+                mDelaysMs[static_cast<size_t>(i)] = (std::max)(d, 10);
+            }
+            STBI_FREE(delays);
+        } else {
+            for (int i = 0; i < z; ++i) {
+                mDelaysMs[static_cast<size_t>(i)] = 100;
+            }
+        }
+
+        stbi_image_free(allFrames);
+
+        mWidth = x;
+        mHeight = y;
+        mChannelNum = 4;
+        mPixelDataType = GL_UNSIGNED_BYTE;
+        mImageFormat = GL_RGBA8;
+
+        mFilePath = filepath;
+        mFileName = filepath.substr(filepath.find_last_of("/") + 1);
+
+        mCurFrame = 0;
+        mTimeBankMs = 0.0f;
+        mUploadedFrame = -1;
+
+        return true;
+    }
+
+    bool reloadFile() override
+    {
+        return loadFromFile(mFilePath) && upload();
+    }
+
+    bool upload() override
+    {
+        ScopeMarker(__FUNCTION__);
+
+        if (mFrames.empty() || mWidth <= 0 || mHeight <= 0) {
+            return false;
+        }
+
+        if (mTexId == 0) {
+            glGenTextures(1, &mTexId);
+        }
+
+        glBindTexture(GL_TEXTURE_2D, mTexId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+        glTexStorage2D(GL_TEXTURE_2D, 1, mImageFormat, mWidth, mHeight);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mWidth, mHeight, GL_RGBA, mPixelDataType,
+                        mFrames[0].data());
+
+        mUploadedFrame = 0;
+        return true;
+    }
+
+    void tick(float deltaTimeSec) override
+    {
+        if (mTexId == 0 || mFrames.size() <= 1) {
+            return;
+        }
+
+        const float dtMs = deltaTimeSec * 1000.0f;
+        mTimeBankMs += dtMs;
+
+        // Advance frames; handle large dt by looping.
+        int advanced = 0;
+        while (mTimeBankMs >= static_cast<float>(mDelaysMs[mCurFrame]) && advanced < 64) {
+            mTimeBankMs -= static_cast<float>(mDelaysMs[mCurFrame]);
+            mCurFrame = (mCurFrame + 1) % static_cast<int>(mFrames.size());
+            ++advanced;
+        }
+
+        if (mCurFrame == mUploadedFrame) {
+            return;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, mTexId);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mWidth, mHeight, GL_RGBA, mPixelDataType,
+                        mFrames[static_cast<size_t>(mCurFrame)].data());
+        mUploadedFrame = mCurFrame;
+    }
+
+    void release() override
+    {
+        Texture::release();
+        mFrames.clear();
+        mDelaysMs.clear();
+        mCurFrame = 0;
+        mUploadedFrame = -1;
+        mTimeBankMs = 0.0f;
+    }
+
+private:
+    std::vector<std::vector<uint8_t>> mFrames;
+    std::vector<int> mDelaysMs;
+    int mCurFrame = 0;
+    int mUploadedFrame = -1;
+    float mTimeBankMs = 0.0f;
+};
+
+TextureSPtr createTextureForFile(const std::string& filepath)
+{
+    const ImageType type = Texture::getImageType(filepath);
+    if (type == ImageType::GIF) {
+        return std::make_shared<AnimatedGifTexture>();
+    }
+    return std::make_shared<Texture>();
+}
 
 bool Texture::isSupported(const std::string& filepath)
 {

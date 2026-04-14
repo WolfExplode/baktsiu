@@ -772,6 +772,17 @@ void App::run(CompositeFlags initFlags)
         
         ImGuiIO& io = ImGui::GetIO();
 
+        // Advance animated textures (e.g. GIF) in image mode.
+        for (auto& img : mImageList) {
+            if (!img) {
+                continue;
+            }
+            Texture* tex = img->getTexture();
+            if (tex) {
+                tex->tick(io.DeltaTime);
+            }
+        }
+
         // Use WantCaptureMouse + GLFW focus, not "!AnyWindowFocused". Toolbar items call
         // SetItemDefaultFocus(), so an ImGui window always has focus at startup and would
         // block pan/scroll until the user clicked away — even with the mouse over the image.
@@ -3022,10 +3033,16 @@ void    App::importImageFiles(const std::vector<std::string>& filepathArray,
     }
 
     Action action(Action::Type::Add, mTopImageIndex, mCmpImageIndex);
+    std::vector<std::string> videoPaths;
 
     for (size_t i = 0; i < imageNum; ++i) {
         std::string path = filepathArray[i];
         std::replace(path.begin(), path.end(), '\\', '/');
+
+        if (MpvGlPlayer::isSupportedExtension(path)) {
+            videoPaths.push_back(path);
+            continue;
+        }
 
         if (!Texture::isSupported(path)) {
             LOGW("Unsupported image type for \"{}\"", path);
@@ -3065,6 +3082,24 @@ void    App::importImageFiles(const std::vector<std::string>& filepathArray,
         action.filepathArray.push_back(path);
         action.imageIdxArray.push_back(Action::composeImageIndex(id, insertIdx));
         mUpdateImageSelection = true;
+    }
+
+    if (!videoPaths.empty()) {
+#if defined(USE_VIDEO)
+        for (const std::string& p : videoPaths) {
+            const int idx = addVideoPath(p);
+            if (idx >= 0) {
+                if (mVideoIndexL < 0) {
+                    mVideoIndexL = idx;
+                } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
+                    mVideoIndexR = idx;
+                }
+            }
+        }
+        openVideosFromSelection();
+#else
+        LOGW("Video playback is disabled in this build (USE_VIDEO).");
+#endif
     }
     
     if (recordAction) {
