@@ -1282,8 +1282,8 @@ void    App::updateImageTransform(const ImGuiIO& io, bool useColumnView)
 
     mImageScale = inSideBySideMode() ? mColumnViews[0].getImageScale() : mView.getImageScale();
 
-    // Mouse on image: GLFW window focused and ImGui not consuming mouse this frame (see run()).
-    const bool imageMouseActive = glfwGetWindowAttrib(mWindow, GLFW_FOCUSED) && !io.WantCaptureMouse;
+    // Mouse on image: allow hover interactions even when the window is inactive.
+    const bool imageMouseActive = !io.WantCaptureMouse;
     float oldImageScale = mImageScale;
     
     static bool isInSniperMode = false;
@@ -1460,7 +1460,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
     const bool useColumnView = videoCompareActive() && mCompositeFlags == CompositeFlags::SideBySide;
     mImageScale = useColumnView ? mVideoColumnViews[0].getImageScale() : mVideoView.getImageScale();
 
-    const bool videoMouseActive = glfwGetWindowAttrib(mWindow, GLFW_FOCUSED) && !io.WantCaptureMouse;
+    // Mouse on video: allow hover interactions even when the window is inactive.
+    const bool videoMouseActive = !io.WantCaptureMouse;
     float oldImageScale = mImageScale;
 
     static bool isVideoSniperMode = false;
