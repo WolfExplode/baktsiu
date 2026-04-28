@@ -1384,18 +1384,24 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
             mIsScalingImage = false;
         }
 
+        Vec2f contentOrigin;
+        Vec2f contentSize;
+        getVideoBlitContentLayout(io, contentOrigin, contentSize);
+        const float mx = io.MousePos.x;
+        const float my = io.MousePos.y;
+        const bool inContent = mx >= contentOrigin.x && mx < contentOrigin.x + contentSize.x
+            && my >= contentOrigin.y && my < contentOrigin.y + contentSize.y;
+        if (ImGui::IsMouseDoubleClicked(0) && inContent && !mVideoViewportRmbScrubActive && !mIsMovingSplitter
+            && !ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(2)) {
+            mVideoPlaying ^= true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
+        }
+
         if (!shouldShowSplitter() && !splitForVideoCompare && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
             mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
             mIsScalingImage = true;
         } else if (mVideoMode && ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(2)) {
-            Vec2f contentOrigin;
-            Vec2f contentSize;
-            getVideoBlitContentLayout(io, contentOrigin, contentSize);
-            const float mx = io.MousePos.x;
-            const float my = io.MousePos.y;
-            const bool inContent = mx >= contentOrigin.x && mx < contentOrigin.x + contentSize.x
-                && my >= contentOrigin.y && my < contentOrigin.y + contentSize.y;
-
             if (ImGui::IsMouseClicked(1) && inContent) {
                 mVideoViewportRmbScrubActive = true;
                 mVideoResumePlaybackAfterViewportScrub = mVideoPlaying;
