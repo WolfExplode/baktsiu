@@ -976,10 +976,6 @@ void App::run(CompositeFlags initFlags)
                         computeVideoTextureHistogram(mVideoTextureB, mVideoReaderB->width(), mVideoReaderB->height(),
                             mTexHistogramB, mHistogramB);
                     }
-                } else if (videoCompareActive() && mVideoReaderB && mVideoReaderB->isOpen() && mVideoTextureB != 0
-                    && mVideoSwapPresentationLR) {
-                    computeVideoTextureHistogram(mVideoTextureB, mVideoReaderB->width(), mVideoReaderB->height(),
-                        mTexHistogram, mHistogram);
                 } else {
                     computeVideoTextureHistogram(
                         mVideoTexture, mVideoReader->width(), mVideoReader->height(), mTexHistogram, mHistogram);
@@ -1517,6 +1513,23 @@ void App::updateImagePairFromPressedKeys()
                 swapVideoSides();
                 return;
             } else if (isNext || isPrev) {
+                if (!videoCompareActive()) {
+                    // Solo playback: step only the active list row; keep a single decoder.
+                    int l = mVideoIndexL;
+                    if (l < 0 || l >= n) {
+                        l = 0;
+                    }
+                    if (isNext) {
+                        l = (l + 1) % n;
+                    } else {
+                        l = (l - 1 + n) % n;
+                    }
+                    mVideoIndexL = l;
+                    mVideoIndexR = -1;
+                    mVideoSwapPresentationLR = false;
+                    openVideosFromSelection();
+                    return;
+                }
                 // With exactly 2 media, Left/Right should behave like images and swap instantly.
                 // Avoid re-opening readers/textures (which is expensive) when we can just swap in memory.
                 if (n == 2 && videoCompareActive()) {
@@ -1643,7 +1656,8 @@ void    App::initToolbar()
     }
 #endif
 #if defined(USE_VIDEO)
-    const bool couldCompare = (mImageList.size() > 1) || (mVideoMode && videoCompareActive());
+    const bool couldCompare = (mImageList.size() > 1)
+        || (mVideoMode && (videoCompareActive() || static_cast<int>(mVideoPaths.size()) >= 2));
 #else
     const bool couldCompare = mImageList.size() > 1;
 #endif
@@ -2019,54 +2033,80 @@ void App::initImagePropWindow()
         // mVideoSwapPresentationLR is enabled (presentation-only swap for instant switching).
 #if defined(USE_VIDEO)
         const int nMedia = static_cast<int>(mVideoPaths.size());
-        const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
-        int& idxDispL = dispSwap ? mVideoIndexR : mVideoIndexL;
-        int& idxDispR = dispSwap ? mVideoIndexL : mVideoIndexR;
+        if (videoCompareActive()) {
+            const bool dispSwap = mVideoSwapPresentationLR && videoCompareActive();
+            int& idxDispL = dispSwap ? mVideoIndexR : mVideoIndexL;
+            int& idxDispR = dispSwap ? mVideoIndexL : mVideoIndexR;
 
-        for (int i = 0; i < nMedia; ++i) {
-            const bool isL = (i == idxDispL);
-            const bool isR = (i == idxDispR);
-            const ImVec4 tint = isL ? tintL : (isR ? tintR : ImGui::GetStyleColorVec4(ImGuiCol_Text));
+            for (int i = 0; i < nMedia; ++i) {
+                const bool isL = (i == idxDispL);
+                const bool isR = (i == idxDispR);
+                const ImVec4 tint = isL ? tintL : (isR ? tintR : ImGui::GetStyleColorVec4(ImGuiCol_Text));
 
-            ImGui::PushID(i);
-            char row[160];
-            const char* tag = isL ? "L" : (isR ? "R" : " ");
-            std::snprintf(row, sizeof row, "%s  %s", tag, basename(mVideoPaths[i]));
-            ImGui::PushStyleColor(ImGuiCol_Text, tint);
-            ImGui::Selectable(row, false, 0, Vec2f(propWindowWidth, imageItemHeight));
-            const bool lmb = ImGui::IsItemClicked(0);
-            const bool rmb = ImGui::IsItemClicked(1);
-            ImGui::PopStyleColor(1);
-            ImGui::PopID();
+                ImGui::PushID(i);
+                char row[160];
+                const char* tag = isL ? "L" : (isR ? "R" : " ");
+                std::snprintf(row, sizeof row, "%s  %s", tag, basename(mVideoPaths[i]));
+                ImGui::PushStyleColor(ImGuiCol_Text, tint);
+                ImGui::Selectable(row, false, 0, Vec2f(propWindowWidth, imageItemHeight));
+                const bool lmb = ImGui::IsItemClicked(0);
+                const bool rmb = ImGui::IsItemClicked(1);
+                ImGui::PopStyleColor(1);
+                ImGui::PopID();
 
-            if (lmb) {
-                if (i == idxDispL) {
-                    continue; // no-op
-                }
-                // LMB sets the PRESENTED-left selection.
-                idxDispL = i;
-                if (idxDispR == idxDispL) {
-                    if (nMedia >= 2) {
-                        idxDispR = (i == 0) ? 1 : 0;
-                    } else {
-                        idxDispR = -1;
+                if (lmb) {
+                    if (i == idxDispL) {
+                        continue; // no-op
                     }
-                }
-                openVideosFromSelection();
-            } else if (rmb) {
-                if (i == idxDispR) {
-                    continue; // no-op
-                }
-                // RMB sets the PRESENTED-right selection.
-                idxDispR = i;
-                if (idxDispR == idxDispL) {
-                    if (nMedia >= 2) {
-                        idxDispL = (i == 0) ? 1 : 0;
-                    } else {
-                        idxDispL = -1;
+                    // LMB sets the PRESENTED-left selection.
+                    idxDispL = i;
+                    if (idxDispR == idxDispL) {
+                        if (nMedia >= 2) {
+                            idxDispR = (i == 0) ? 1 : 0;
+                        } else {
+                            idxDispR = -1;
+                        }
                     }
+                    openVideosFromSelection();
+                } else if (rmb) {
+                    if (i == idxDispR) {
+                        continue; // no-op
+                    }
+                    // RMB sets the PRESENTED-right selection.
+                    idxDispR = i;
+                    if (idxDispR == idxDispL) {
+                        if (nMedia >= 2) {
+                            idxDispL = (i == 0) ? 1 : 0;
+                        } else {
+                            idxDispL = -1;
+                        }
+                    }
+                    openVideosFromSelection();
                 }
-                openVideosFromSelection();
+            }
+        } else {
+            for (int i = 0; i < nMedia; ++i) {
+                const bool sel = (i == mVideoIndexL);
+                ImGui::PushID(i);
+                char row[160];
+                std::snprintf(row, sizeof row, "   %s", basename(mVideoPaths[i]));
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    sel ? tintL : ImGui::GetStyleColorVec4(ImGuiCol_Text));
+                ImGui::Selectable(row, sel, 0, Vec2f(propWindowWidth, imageItemHeight));
+                const bool lmb = ImGui::IsItemClicked(0);
+                const bool rmb = ImGui::IsItemClicked(1);
+                ImGui::PopStyleColor(1);
+                ImGui::PopID();
+                if (lmb && !sel) {
+                    mVideoIndexL = i;
+                    mVideoIndexR = -1;
+                    mVideoSwapPresentationLR = false;
+                    openVideosFromSelection();
+                } else if (rmb && i != mVideoIndexL) {
+                    mVideoIndexR = i;
+                    mVideoSwapPresentationLR = false;
+                    openVideosFromSelection();
+                }
             }
         }
 #else
@@ -2483,24 +2523,24 @@ void App::showVideoProperties()
     ImGui::NextColumn();
     ImGui::Separator();
 
-    double tMin = 0.0;
-    double tMax = 1.0;
-    recomputeVideoScrubBounds(tMin, tMax);
-    char tComp[32];
-    char tEnd[32];
-    formatVideoHms(mVideoCompositionT, tComp, sizeof tComp);
-    formatVideoHms(tMax, tEnd, sizeof tEnd);
-    ImGui::TextUnformatted("Composition T");
-    ImGui::NextColumn();
-    {
-        char line[80];
-        std::snprintf(line, sizeof line, "%s / %s", tComp, tEnd);
-        ImGui::TextUnformatted(line);
-    }
-    ImGui::NextColumn();
-
     const bool cmp = videoCompareActive();
     if (cmp) {
+        double tMin = 0.0;
+        double tMax = 1.0;
+        recomputeVideoScrubBounds(tMin, tMax);
+        char tComp[32];
+        char tEnd[32];
+        formatVideoHms(mVideoCompositionT, tComp, sizeof tComp);
+        formatVideoHms(tMax, tEnd, sizeof tEnd);
+        ImGui::TextUnformatted("Composition T");
+        ImGui::NextColumn();
+        {
+            char line[80];
+            std::snprintf(line, sizeof line, "%s / %s", tComp, tEnd);
+            ImGui::TextUnformatted(line);
+        }
+        ImGui::NextColumn();
+
         const bool dispSwap = mVideoSwapPresentationLR;
         char offL[48];
         char offR[48];
@@ -2986,9 +3026,12 @@ void    App::showImportImageDlg()
     if (!videoPaths.empty()) {
 #if defined(USE_VIDEO)
         // Add all selected videos to the media list, then open current selection.
+        std::vector<int> addedIdx;
+        addedIdx.reserve(videoPaths.size());
         for (const std::string& p : videoPaths) {
             const int idx = addVideoPath(p);
             if (idx >= 0) {
+                addedIdx.push_back(idx);
                 if (mVideoIndexL < 0) {
                     mVideoIndexL = idx;
                 } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
@@ -2996,6 +3039,7 @@ void    App::showImportImageDlg()
                 }
             }
         }
+        applyImportedVideoListSelection(addedIdx);
         openVideosFromSelection();
 #else
         LOGW("Video playback is disabled in this build (USE_VIDEO).");
@@ -3086,9 +3130,12 @@ void    App::importImageFiles(const std::vector<std::string>& filepathArray,
 
     if (!videoPaths.empty()) {
 #if defined(USE_VIDEO)
+        std::vector<int> addedIdx;
+        addedIdx.reserve(videoPaths.size());
         for (const std::string& p : videoPaths) {
             const int idx = addVideoPath(p);
             if (idx >= 0) {
+                addedIdx.push_back(idx);
                 if (mVideoIndexL < 0) {
                     mVideoIndexL = idx;
                 } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
@@ -3096,6 +3143,7 @@ void    App::importImageFiles(const std::vector<std::string>& filepathArray,
                 }
             }
         }
+        applyImportedVideoListSelection(addedIdx);
         openVideosFromSelection();
 #else
         LOGW("Video playback is disabled in this build (USE_VIDEO).");
@@ -3292,6 +3340,7 @@ inline void    App::toggleSplitView()
     const bool canCompare = (mCmpImageIndex != -1)
 #if defined(USE_VIDEO)
         || videoCompareActive()
+        || (mVideoMode && static_cast<int>(mVideoPaths.size()) >= 2)
 #endif
         ;
     if (canCompare) {
@@ -3300,6 +3349,21 @@ inline void    App::toggleSplitView()
 #endif
         mCompositeFlags = toggleFlags(mCompositeFlags & ~CompositeFlags::SideBySide, CompositeFlags::Split);
 #if defined(USE_VIDEO)
+        const bool nowSplitOrSbs =
+            (mCompositeFlags & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+        if (mVideoMode && nowSplitOrSbs && !videoCompareActive()) {
+            const int n = static_cast<int>(mVideoPaths.size());
+            if (n >= 2 && mVideoIndexL >= 0 && mVideoIndexL < n
+                && (mVideoIndexR < 0 || mVideoIndexR >= n || mVideoIndexR == mVideoIndexL)) {
+                for (int i = 0; i < n; ++i) {
+                    if (i != mVideoIndexL) {
+                        mVideoIndexR = i;
+                        break;
+                    }
+                }
+                openVideosFromSelection();
+            }
+        }
         if (mVideoMode && videoCompareActive()) {
             const bool wasLayoutCompare =
                 (prevComposite & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
@@ -3318,6 +3382,7 @@ inline void    App::toggleSideBySideView()
     const bool canCompare = (mCmpImageIndex != -1)
 #if defined(USE_VIDEO)
         || videoCompareActive()
+        || (mVideoMode && static_cast<int>(mVideoPaths.size()) >= 2)
 #endif
         ;
     if (canCompare) {
@@ -3326,6 +3391,21 @@ inline void    App::toggleSideBySideView()
 #endif
         mCompositeFlags = toggleFlags(mCompositeFlags & ~CompositeFlags::Split, CompositeFlags::SideBySide);
 #if defined(USE_VIDEO)
+        const bool nowSplitOrSbs =
+            (mCompositeFlags & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
+        if (mVideoMode && nowSplitOrSbs && !videoCompareActive()) {
+            const int n = static_cast<int>(mVideoPaths.size());
+            if (n >= 2 && mVideoIndexL >= 0 && mVideoIndexL < n
+                && (mVideoIndexR < 0 || mVideoIndexR >= n || mVideoIndexR == mVideoIndexL)) {
+                for (int i = 0; i < n; ++i) {
+                    if (i != mVideoIndexL) {
+                        mVideoIndexR = i;
+                        break;
+                    }
+                }
+                openVideosFromSelection();
+            }
+        }
         if (mVideoMode && videoCompareActive()) {
             const bool wasLayoutCompare =
                 (prevComposite & (CompositeFlags::Split | CompositeFlags::SideBySide)) != CompositeFlags::Top;
@@ -3381,9 +3461,12 @@ void    App::onFileDrop(int count, const char* filepaths[])
 
     if (!videoPaths.empty()) {
 #if defined(USE_VIDEO)
+        std::vector<int> addedIdx;
+        addedIdx.reserve(videoPaths.size());
         for (const std::string& p : videoPaths) {
             const int idx = addVideoPath(p);
             if (idx >= 0) {
+                addedIdx.push_back(idx);
                 if (mVideoIndexL < 0) {
                     mVideoIndexL = idx;
                 } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
@@ -3391,6 +3474,7 @@ void    App::onFileDrop(int count, const char* filepaths[])
                 }
             }
         }
+        applyImportedVideoListSelection(addedIdx);
         openVideosFromSelection();
 #else
         LOGW("Video playback is disabled in this build (USE_VIDEO).");
@@ -4098,6 +4182,29 @@ int App::addVideoPath(const std::string& filepath)
 #endif
 }
 
+void App::applyImportedVideoListSelection(const std::vector<int>& addedListIndices)
+{
+#if !defined(USE_VIDEO)
+    (void)addedListIndices;
+    return;
+#else
+    if (addedListIndices.empty() || mCompositeFlags == CompositeFlags::Split) {
+        return;
+    }
+    if (addedListIndices.size() == 1) {
+        mVideoIndexL = addedListIndices[0];
+        mVideoIndexR = -1;
+    } else {
+        mVideoIndexL = addedListIndices[0];
+        mVideoIndexR = addedListIndices[1];
+        if (mVideoIndexL == mVideoIndexR) {
+            mVideoIndexR = -1;
+        }
+    }
+    mVideoSwapPresentationLR = false;
+#endif
+}
+
 void App::openVideosFromSelection()
 {
 #if !defined(USE_VIDEO)
@@ -4110,9 +4217,12 @@ void App::openVideosFromSelection()
 
     const int idxL = mVideoIndexL;
     int idxR = (mVideoIndexR >= 0 && mVideoIndexR < n && mVideoIndexR != idxL) ? mVideoIndexR : -1;
-    // If exactly two media are loaded, auto-pick the other as right so compare/swap works
-    // without requiring an explicit RMB selection.
-    if (idxR < 0 && n == 2) {
+    // In split/side-by-side only: if R is unset and exactly two paths exist, auto-pick the other row
+    // so compare opens without an explicit RMB. Top/solo keeps mVideoIndexR == -1 until the user
+    // picks a right clip or switches to split/side-by-side (toggle fills R and reopens).
+    if (idxR < 0 && n == 2
+        && (mCompositeFlags == CompositeFlags::Split
+            || mCompositeFlags == CompositeFlags::SideBySide)) {
         idxR = (idxL == 0) ? 1 : 0;
         mVideoIndexR = idxR;
     }
@@ -4238,9 +4348,9 @@ void App::openVideosFromSelection()
     mVideoMode = true;
     mVideoPlaying = true;
     mVideoPlaybackTimeBank = 0.0;
-    if (mVideoReaderB && mVideoReaderB->isOpen()) {
-        mCompositeFlags = CompositeFlags::Split;
-    } else {
+    // Single-stream video: Top is the only meaningful layout. Dual/compare keeps the user's
+    // current composite mode (Top overlay, Split, or SideBySide) instead of forcing Split.
+    if (!(mVideoReaderB && mVideoReaderB->isOpen())) {
         mCompositeFlags = CompositeFlags::Top;
     }
 
@@ -4338,9 +4448,12 @@ void App::openVideoPaths(const std::vector<std::string>& paths)
     if (paths.empty()) {
         return;
     }
+    std::vector<int> addedIdx;
+    addedIdx.reserve(paths.size());
     for (const std::string& p : paths) {
         const int idx = addVideoPath(p);
         if (idx >= 0) {
+            addedIdx.push_back(idx);
             if (mVideoIndexL < 0) {
                 mVideoIndexL = idx;
             } else if (mVideoIndexR < 0 && idx != mVideoIndexL) {
@@ -4348,6 +4461,7 @@ void App::openVideoPaths(const std::vector<std::string>& paths)
             }
         }
     }
+    applyImportedVideoListSelection(addedIdx);
     openVideosFromSelection();
 #endif
 }

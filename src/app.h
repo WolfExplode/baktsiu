@@ -237,6 +237,9 @@ private:
 
     void    openVideosFromSelection();
 
+    // After addVideoPath batch: in Top or SideBySide, focus list rows on the new paths; Split keeps L/R from fill logic.
+    void    applyImportedVideoListSelection(const std::vector<int>& addedListIndices);
+
     void    initVideoTransportBar(const ImGuiIO& io);
 
     void    tickAndUploadVideoFrame(float deltaTime);
