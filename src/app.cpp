@@ -3435,7 +3435,8 @@ void    App::saveSession(const std::string& filepath)
 namespace
 {
 constexpr double kVideoScrubUnknownMaxSec = 3600.0 * 24.0;  // 24h upper composition bound when duration unknown
-// Small forward frame steps: prefer keyframe-style seek below this delta (see seek(..., false)).
+// Forward seeks in (min, max] use keyframe-style seek in mpv (see MpvGlPlayer::applySeek); outside that range use exact.
+constexpr double kVideoForwardKeyframeSeekMinSec = 0.12;  // above typical single-frame deltas (comma/period)
 constexpr double kVideoForwardKeyframeSeekMaxSec = 1.35;
 // Cap real-time delta fed into playback clocks so a blocking open / hitch does not schedule many decodes in one UI frame.
 constexpr double kVideoPlaybackWallDtCapSec = 0.25;
@@ -4033,11 +4034,11 @@ void App::stepVideoScrubOneFrame(int direction)
     if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
         mVideoDbgLastUploadLMs = 0.f;
     }
-    // Small forward steps: seek(..., false) uses keyframe-style seek in mpv; large/backward use exact seek.
+    // Forward: keyframe seek only for scrub-sized jumps; comma/period-sized steps need exact seek.
     const double deltaSec = newPos - pos;
-    const bool forwardCatchup =
-        direction > 0 && deltaSec >= -1e-9 && deltaSec <= kVideoForwardKeyframeSeekMaxSec;
-    mVideoReader->seek(newPos, !forwardCatchup);
+    const bool forwardKeyframeSeek = direction > 0 && deltaSec > kVideoForwardKeyframeSeekMinSec
+        && deltaSec <= kVideoForwardKeyframeSeekMaxSec;
+    mVideoReader->seek(newPos, !forwardKeyframeSeek);
     mVideoReader->decodeFrameThrough(newPos);
     uploadVideoTexture();
     if (videoPipelineDbgEnabled(mVideoLogPipelineTiming)) {
