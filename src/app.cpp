@@ -871,6 +871,43 @@ void App::run(CompositeFlags initFlags)
         
         ImGuiIO& io = ImGui::GetIO();
 
+        // PureRef-style window drag: hold RMB and drag anywhere to move the OS window.
+        static bool rmbWindowDragActive = false;
+        static double rmbDragStartCursorScreenX = 0.0;
+        static double rmbDragStartCursorScreenY = 0.0;
+        static int rmbDragStartWindowX = 0;
+        static int rmbDragStartWindowY = 0;
+        if (ImGui::IsMouseClicked(1)) {
+            rmbWindowDragActive = true;
+            int winX = 0;
+            int winY = 0;
+            double cursorX = 0.0;
+            double cursorY = 0.0;
+            glfwGetWindowPos(mWindow, &winX, &winY);
+            glfwGetCursorPos(mWindow, &cursorX, &cursorY);
+            rmbDragStartWindowX = winX;
+            rmbDragStartWindowY = winY;
+            rmbDragStartCursorScreenX = static_cast<double>(winX) + cursorX;
+            rmbDragStartCursorScreenY = static_cast<double>(winY) + cursorY;
+        }
+        if (ImGui::IsMouseReleased(1)) {
+            rmbWindowDragActive = false;
+        }
+        if (rmbWindowDragActive && ImGui::IsMouseDown(1)) {
+            int winX = 0;
+            int winY = 0;
+            double cursorX = 0.0;
+            double cursorY = 0.0;
+            glfwGetWindowPos(mWindow, &winX, &winY);
+            glfwGetCursorPos(mWindow, &cursorX, &cursorY);
+            const double cursorScreenX = static_cast<double>(winX) + cursorX;
+            const double cursorScreenY = static_cast<double>(winY) + cursorY;
+            glfwSetWindowPos(
+                mWindow,
+                rmbDragStartWindowX + static_cast<int>(std::round(cursorScreenX - rmbDragStartCursorScreenX)),
+                rmbDragStartWindowY + static_cast<int>(std::round(cursorScreenY - rmbDragStartCursorScreenY)));
+        }
+
         // Advance animated textures (e.g. GIF) in image mode.
         for (auto& img : mImageList) {
             if (!img) {
@@ -1420,8 +1457,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
         return;
     }
 
-    // Finish viewport RMB scrub even if the cursor moved over ImGui (release would otherwise be missed).
-    if (ImGui::IsMouseReleased(1) && mVideoViewportRmbScrubActive) {
+    // Finish viewport drag scrub even if the cursor moved over ImGui (release would otherwise be missed).
+    if (ImGui::IsMouseReleased(0) && mVideoViewportRmbScrubActive) {
         mVideoViewportRmbScrubActive = false;
         if (videoCompareActive()) {
             clampVideoCompositionT();
@@ -1501,8 +1538,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
         if (!shouldShowSplitter() && !splitForVideoCompare && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
             mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
             mIsScalingImage = true;
-        } else if (mVideoMode && ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(2)) {
-            if (ImGui::IsMouseClicked(1) && inContent) {
+        } else if (mVideoMode && ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(2)) {
+            if (ImGui::IsMouseClicked(0) && inContent) {
                 mVideoViewportRmbScrubActive = true;
                 mVideoResumePlaybackAfterViewportScrub = mVideoPlaying;
                 mVideoPlaying = false;
@@ -1511,7 +1548,7 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
                 mVideoLastScrubDecodeTime = ImGui::GetTime();
             }
 
-            if (mVideoViewportRmbScrubActive && ImGui::IsMouseDown(1)) {
+            if (mVideoViewportRmbScrubActive && ImGui::IsMouseDown(0)) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
                 double tMin = 0.0;
@@ -1524,8 +1561,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
 
                 const bool valueChanged = std::abs(io.MouseDelta.x) > 0.0001f;
                 const bool itemActive = true;
-                const bool itemActivated = ImGui::IsMouseClicked(1);
-                const bool itemClicked = ImGui::IsMouseClicked(1);
+                const bool itemActivated = ImGui::IsMouseClicked(0);
+                const bool itemClicked = ImGui::IsMouseClicked(0);
 
                 struct ViewportScrubHint {
                     bool run = false;
