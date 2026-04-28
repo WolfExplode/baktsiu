@@ -168,6 +168,9 @@ private:
 
     void    updateImagePairFromPressedKeys();
 
+    // Resize window once to the first successfully loaded media aspect ratio.
+    void    applyInitialWindowAspectFromSize(float mediaW, float mediaH);
+
     // Update image transform from user's key stroke and mouse input.
     void    updateImageTransform(const ImGuiIO&, bool useColumnView);
 
@@ -367,6 +370,7 @@ private:
 
     bool        mVideoMode = false;
     bool        mVideoPlaying = false;
+    bool        mInitialMediaAspectApplied = false;
     // Defer lazy duration probe so the first paint after open is not blocked by a full-stream read.
     int         mVideoLazyDurationGraceFrames = 0;
     double      mVideoPlaybackTimeBank = 0.0;

@@ -729,6 +729,10 @@ void App::processTextureUploadTasks()
     if (!isUndo && mTexturePool.hasNoPendingTasks()) {
         mTopImageIndex = static_cast<int>(mImageList.size()) - 1;
         resetImageTransform(getTopImage()->size());
+        if (!mInitialMediaAspectApplied) {
+            const Vec2f firstImageSize = getTopImage()->size();
+            applyInitialWindowAspectFromSize(firstImageSize.x, firstImageSize.y);
+        }
 
         if (mCmpImageIndex == -1 && mTopImageIndex >= 1) {
             mCmpImageIndex = 0;
@@ -736,6 +740,55 @@ void App::processTextureUploadTasks()
 
         mUpdateImageSelection = false;
     }
+}
+
+void App::applyInitialWindowAspectFromSize(float mediaW, float mediaH)
+{
+    if (mInitialMediaAspectApplied || !mWindow) {
+        return;
+    }
+    if (!(mediaW > 0.0f) || !(mediaH > 0.0f)) {
+        return;
+    }
+
+    const float aspect = mediaW / mediaH;
+    if (!(aspect > 0.0f)) {
+        return;
+    }
+
+    int curW = 0;
+    int curH = 0;
+    glfwGetWindowSize(mWindow, &curW, &curH);
+    if (curW <= 0 || curH <= 0) {
+        return;
+    }
+
+    const float area = static_cast<float>(curW) * static_cast<float>(curH);
+    int targetW = static_cast<int>(std::round(std::sqrt(area * aspect)));
+    int targetH = static_cast<int>(std::round(static_cast<float>(targetW) / aspect));
+
+    const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+    if (mode) {
+        const int maxW = (std::max)(640, static_cast<int>(std::round(mode->width * 0.95)));
+        const int maxH = (std::max)(360, static_cast<int>(std::round(mode->height * 0.90)));
+        if (targetW > maxW) {
+            targetW = maxW;
+            targetH = static_cast<int>(std::round(static_cast<float>(targetW) / aspect));
+        }
+        if (targetH > maxH) {
+            targetH = maxH;
+            targetW = static_cast<int>(std::round(static_cast<float>(targetH) * aspect));
+        }
+    }
+
+    targetW = glm::clamp(targetW, 640, 8192);
+    targetH = glm::clamp(targetH, 360, 8192);
+    if (targetW <= 0 || targetH <= 0) {
+        return;
+    }
+
+    glfwSetWindowSize(mWindow, targetW, targetH);
+    mInitialMediaAspectApplied = true;
 }
 
 void App::run(CompositeFlags initFlags)
@@ -4469,6 +4522,7 @@ void App::openVideosFromSelection()
     mVideoPathR = pathR;
     mVideoSwapPresentationLR = false;
     mVideoPendingViewFitReset = true;
+    applyInitialWindowAspectFromSize(mVideoReader->displayWidthForAspect(), mVideoReader->displayHeightForAspect());
 
     // Reset offsets when changing active media.
     mVideoStartL = 0.0;
