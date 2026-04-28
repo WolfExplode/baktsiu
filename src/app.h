@@ -391,6 +391,9 @@ private:
     double      mVideoLastScrubDecodeTime = -1.0e9;
     // Snapshot when a scrub drag begins; used to resume playback after release if it was playing.
     bool        mVideoPlayingBeforeScrub = false;
+    // Right-drag scrub on the video viewport (not the transport slider).
+    bool        mVideoViewportRmbScrubActive = false;
+    bool        mVideoResumePlaybackAfterViewportScrub = false;
     bool        mVideoLogPipelineTiming = false;
     float       mVideoDbgLastUploadLMs = 0.f;
     float       mVideoDbgLastUploadRMs = 0.f;

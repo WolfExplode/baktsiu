@@ -1321,6 +1321,26 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
         return;
     }
 
+    // Finish viewport RMB scrub even if the cursor moved over ImGui (release would otherwise be missed).
+    if (ImGui::IsMouseReleased(1) && mVideoViewportRmbScrubActive) {
+        mVideoViewportRmbScrubActive = false;
+        if (videoCompareActive()) {
+            clampVideoCompositionT();
+            syncVideoDecodersToCompositionT();
+            mVideoScrubValue = mVideoCompositionT;
+        } else {
+            mVideoReader->seek(mVideoScrubValue, true);
+            mVideoReader->decodeFrameThrough(mVideoScrubValue, 0);
+            uploadVideoTexture();
+        }
+        if (mVideoResumePlaybackAfterViewportScrub) {
+            mVideoPlaying = true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
+        }
+        mVideoResumePlaybackAfterViewportScrub = false;
+    }
+
     Vec2f scalePivot(-1.0f);
     bool mouseAtRightColumn = false;
     auto fetchScalePivot = [](const ImGuiIO& io, bool useColumnView, float viewSplitPos, bool& mouseAtRightColumn) {
@@ -1367,6 +1387,93 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
         if (!shouldShowSplitter() && !splitForVideoCompare && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
             mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
             mIsScalingImage = true;
+        } else if (mVideoMode && ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(2)) {
+            Vec2f contentOrigin;
+            Vec2f contentSize;
+            getVideoBlitContentLayout(io, contentOrigin, contentSize);
+            const float mx = io.MousePos.x;
+            const float my = io.MousePos.y;
+            const bool inContent = mx >= contentOrigin.x && mx < contentOrigin.x + contentSize.x
+                && my >= contentOrigin.y && my < contentOrigin.y + contentSize.y;
+
+            if (ImGui::IsMouseClicked(1) && inContent) {
+                mVideoViewportRmbScrubActive = true;
+                mVideoResumePlaybackAfterViewportScrub = mVideoPlaying;
+                mVideoPlaying = false;
+                mVideoPlaybackTimeBank = 0.0;
+                mVideoComparePlaybackBank = 0.0;
+                mVideoLastScrubDecodeTime = ImGui::GetTime();
+            }
+
+            if (mVideoViewportRmbScrubActive && ImGui::IsMouseDown(1)) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+                double tMin = 0.0;
+                double tMax = 1.0;
+                recomputeVideoScrubBounds(tMin, tMax);
+                const double span = (std::max)(tMax - tMin, 1e-9);
+                const double dT =
+                    (static_cast<double>(io.MouseDelta.x) / static_cast<double>((std::max)(contentSize.x, 1.0f)))
+                    * span;
+
+                const bool valueChanged = std::abs(io.MouseDelta.x) > 0.0001f;
+                const bool itemActive = true;
+                const bool itemActivated = ImGui::IsMouseClicked(1);
+                const bool itemClicked = ImGui::IsMouseClicked(1);
+
+                struct ViewportScrubHint {
+                    bool run = false;
+                    int maxReadCapPerStream = 0;
+                };
+                auto viewportScrubHint = [&](bool itemActive2, bool itemActivated2, bool itemClicked2,
+                    bool valueChanged2, bool itemDeactivated2, double imguiTimeSec) -> ViewportScrubHint {
+                    ViewportScrubHint out;
+                    constexpr double kMinIntervalSec = 1.0 / 20.0;
+                    constexpr int kPreviewReadCap = 96;
+                    if (itemDeactivated2 || itemActivated2 || itemClicked2) {
+                        mVideoLastScrubDecodeTime = imguiTimeSec;
+                        out.run = true;
+                        out.maxReadCapPerStream = 0;
+                        return out;
+                    }
+                    if (itemActive2 && valueChanged2) {
+                        if (imguiTimeSec - mVideoLastScrubDecodeTime >= kMinIntervalSec) {
+                            mVideoLastScrubDecodeTime = imguiTimeSec;
+                            out.run = true;
+                            out.maxReadCapPerStream = kPreviewReadCap;
+                            return out;
+                        }
+                    }
+                    return out;
+                };
+
+                const ViewportScrubHint scrubHint = viewportScrubHint(
+                    itemActive, itemActivated, itemClicked, valueChanged, false, ImGui::GetTime());
+
+                if (videoCompareActive()) {
+                    mVideoCompositionT += dT;
+                    clampVideoCompositionT();
+                    mVideoScrubValue = mVideoCompositionT;
+                } else {
+                    mVideoScrubValue += dT;
+                    if (mVideoScrubValue < tMin) {
+                        mVideoScrubValue = tMin;
+                    }
+                    if (mVideoScrubValue > tMax) {
+                        mVideoScrubValue = tMax;
+                    }
+                }
+
+                if (scrubHint.run) {
+                    if (videoCompareActive()) {
+                        syncVideoDecodersToCompositionT(scrubHint.maxReadCapPerStream);
+                    } else {
+                        mVideoReader->seek(mVideoScrubValue, scrubHint.maxReadCapPerStream <= 0);
+                        mVideoReader->decodeFrameThrough(mVideoScrubValue, scrubHint.maxReadCapPerStream);
+                        uploadVideoTexture();
+                    }
+                }
+            }
         } else if (!mIsMovingSplitter && ImGui::IsMouseDown(2)) {
             if (io.KeyCtrl) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
@@ -4473,6 +4580,8 @@ void App::exitVideoMode()
 #else
     mVideoMode = false;
     mVideoPlaying = false;
+    mVideoViewportRmbScrubActive = false;
+    mVideoResumePlaybackAfterViewportScrub = false;
     mVideoPendingViewFitReset = false;
     mVideoLazyDurationGraceFrames = 0;
     mVideoPlaybackTimeBank = 0.0;
@@ -4961,13 +5070,14 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
         }
-        if (!itemActive) {
+        if (!itemActive && !mVideoViewportRmbScrubActive) {
             mVideoScrubValue = mVideoCompositionT;
         }
         ImGui::PopID();
 
         ImGui::SameLine();
-        const double tShown = itemActive ? mVideoScrubValue : mVideoCompositionT;
+        const double tShown =
+            (itemActive || mVideoViewportRmbScrubActive) ? mVideoScrubValue : mVideoCompositionT;
         char tBuf[32];
         char maxBuf[32];
         formatVideoHms(tShown, tBuf, sizeof tBuf);
@@ -5109,13 +5219,14 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
         }
-        if (!itemActive) {
+        if (!itemActive && !mVideoViewportRmbScrubActive) {
             mVideoScrubValue = mVideoReader->positionSec();
         }
         ImGui::PopID();
 
         ImGui::SameLine();
-        const double tDisplayed = itemActive ? mVideoScrubValue : mVideoReader->positionSec();
+        const double tDisplayed =
+            (itemActive || mVideoViewportRmbScrubActive) ? mVideoScrubValue : mVideoReader->positionSec();
         char posBuf[32];
         char durBuf[32];
         formatVideoHms(tDisplayed, posBuf, sizeof posBuf);
