@@ -1429,7 +1429,6 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
                     bool valueChanged2, bool itemDeactivated2, double imguiTimeSec) -> ViewportScrubHint {
                     ViewportScrubHint out;
                     constexpr double kMinIntervalSec = 1.0 / 20.0;
-                    constexpr int kPreviewReadCap = 96;
                     if (itemDeactivated2 || itemActivated2 || itemClicked2) {
                         mVideoLastScrubDecodeTime = imguiTimeSec;
                         out.run = true;
@@ -1440,7 +1439,7 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
                         if (imguiTimeSec - mVideoLastScrubDecodeTime >= kMinIntervalSec) {
                             mVideoLastScrubDecodeTime = imguiTimeSec;
                             out.run = true;
-                            out.maxReadCapPerStream = kPreviewReadCap;
+                            out.maxReadCapPerStream = 0;
                             return out;
                         }
                     }
@@ -3697,17 +3696,16 @@ double saneFrameDurSec(const MpvGlPlayer* r)
 
 struct VideoScrubDecodeHint {
     bool run = false;
-    // 0 = exact seek + full render; >0 = keyframe-style seek (scrub preview only).
+    // 0 = exact seek + full decode (preview matches scrub time; same frame as playback resume).
     int maxReadCapPerStream = 0;
 };
 
-// While dragging: throttle + use keyframe seeks between previews; on grab, release, or click: exact seek.
+// Throttle seek+decode while dragging; always exact seeks so preview matches the playhead.
 VideoScrubDecodeHint videoScrubDecodeHint(bool itemActive, bool itemActivated, bool itemClicked, bool valueChanged,
     bool itemDeactivated, double imguiTimeSec, double& lastDecodeTimeSec)
 {
     VideoScrubDecodeHint out;
     constexpr double kMinIntervalSec = 1.0 / 20.0;
-    constexpr int kPreviewReadCap = 96;
     if (itemDeactivated || itemActivated || itemClicked) {
         lastDecodeTimeSec = imguiTimeSec;
         out.run = true;
@@ -3718,7 +3716,7 @@ VideoScrubDecodeHint videoScrubDecodeHint(bool itemActive, bool itemActivated, b
         if (imguiTimeSec - lastDecodeTimeSec >= kMinIntervalSec) {
             lastDecodeTimeSec = imguiTimeSec;
             out.run = true;
-            out.maxReadCapPerStream = kPreviewReadCap;
+            out.maxReadCapPerStream = 0;
             return out;
         }
     }
@@ -4172,7 +4170,7 @@ void App::stepVideoScrubFiveSeconds(int direction)
             mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
             static_cast<double>(mVideoDbgLastUploadLMs), 0);
     }
-    mVideoScrubValue = mVideoReader->positionSec();
+    mVideoScrubValue = newPos;
 #endif
 }
 
@@ -4243,7 +4241,7 @@ void App::stepVideoScrubOneFrame(int direction)
             mVideoReader->lastDecodeThroughReads(), mVideoReader->lastDecodeThroughHitCap() ? 1 : 0,
             static_cast<double>(mVideoDbgLastUploadLMs), 0);
     }
-    mVideoScrubValue = mVideoReader->positionSec();
+    mVideoScrubValue = newPos;
 #endif
 }
 
@@ -4812,6 +4810,7 @@ void App::tickAndUploadVideoFrame(float deltaTime)
             }
         }
 #endif
+        mVideoScrubValue = mVideoCompositionT;
         return;
     }
     double frameDur = mVideoReader->frameDurationSec();
@@ -4839,6 +4838,7 @@ void App::tickAndUploadVideoFrame(float deltaTime)
         }
         uploadVideoTexture();
     }
+    mVideoScrubValue = mVideoReader->positionSec();
 #endif
 }
 
@@ -4982,10 +4982,15 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar
         | ImGuiWindowFlags_NoSavedSettings);
 
-    if (ImGui::Button(mVideoPlaying ? "Pause" : "Play")) {
-        mVideoPlaying ^= true;
-        mVideoPlaybackTimeBank = 0.0;
-        mVideoComparePlaybackBank = 0.0;
+    {
+        const ImGuiStyle& st = ImGui::GetStyle();
+        const float playPauseW =
+            (std::max)(ImGui::CalcTextSize("Play").x, ImGui::CalcTextSize("Pause").x) + st.FramePadding.x * 2.0f;
+        if (ImGui::Button(mVideoPlaying ? "Pause" : "Play", ImVec2(playPauseW, 0.0f))) {
+            mVideoPlaying ^= true;
+            mVideoPlaybackTimeBank = 0.0;
+            mVideoComparePlaybackBank = 0.0;
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Close")) {
@@ -5172,12 +5177,13 @@ void App::initVideoTransportBar(const ImGuiIO& io)
         const double pos = mVideoReader->positionSec();
         const double metaDur = mVideoReader->durationSec();
         const bool durRel = mVideoReader->hasReliableDuration() && metaDur > 0.001;
-        double sliderMaxSec = std::max({videoScrubSpanSec(mVideoReader.get()), pos + 0.01, 0.25});
+        double sliderMaxSec =
+            std::max({videoScrubSpanSec(mVideoReader.get()), pos + 0.01, mVideoScrubValue + 0.01, 0.25});
         if (durRel) {
             const double frameDur = mVideoReader->frameDurationSec();
             const double endSlack = std::max(frameDur * 3.0, 0.1);
             const double seekableEnd = std::max(0.0, metaDur - endSlack);
-            sliderMaxSec = std::max({seekableEnd, pos + 0.01, 0.25});
+            sliderMaxSec = std::max({seekableEnd, pos + 0.01, mVideoScrubValue + 0.01, 0.25});
         }
         const double sliderMinSec = 0.0;
 
@@ -5219,14 +5225,13 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
         }
-        if (!itemActive && !mVideoViewportRmbScrubActive) {
+        if (mVideoPlaying && !itemActive && !mVideoViewportRmbScrubActive) {
             mVideoScrubValue = mVideoReader->positionSec();
         }
         ImGui::PopID();
 
         ImGui::SameLine();
-        const double tDisplayed =
-            (itemActive || mVideoViewportRmbScrubActive) ? mVideoScrubValue : mVideoReader->positionSec();
+        const double tDisplayed = mVideoScrubValue;
         char posBuf[32];
         char durBuf[32];
         formatVideoHms(tDisplayed, posBuf, sizeof posBuf);
