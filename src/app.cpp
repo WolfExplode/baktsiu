@@ -55,6 +55,8 @@ shader.initFromFiles(name, "shaders/"##STRING(vtxName)##".vert", "shaders/"##STR
 
 #ifndef _WIN32
 #include <sys/stat.h>
+#else
+#include <io.h>
 #endif
 
 namespace
@@ -270,6 +272,48 @@ namespace
 {
 
 const char* const kInfoPopupName = "Info";
+
+bool mergeWindowsCjkFallbackFont(ImGuiIO& io, ImFont* dstFont, float sizePx)
+{
+#if !defined(_WIN32)
+    (void)io;
+    (void)dstFont;
+    (void)sizePx;
+    return false;
+#else
+    if (!dstFont) {
+        return false;
+    }
+
+    // Common Windows CJK fonts. Try in order and merge the first available one.
+    static const char* kCandidates[] = {
+        "C:/Windows/Fonts/msyh.ttc",      // Microsoft YaHei
+        "C:/Windows/Fonts/msyhbd.ttc",    // Microsoft YaHei Bold
+        "C:/Windows/Fonts/simhei.ttf",    // SimHei
+        "C:/Windows/Fonts/simsun.ttc",    // SimSun
+        "C:/Windows/Fonts/NotoSansCJK-Regular.ttc",
+    };
+
+    ImFontConfig cfg;
+    cfg.MergeMode = true;
+    cfg.PixelSnapH = true;
+    cfg.DstFont = dstFont;
+    const ImWchar* ranges = io.Fonts->GetGlyphRangesChineseFull();
+
+    for (const char* path : kCandidates) {
+        if (_access(path, 0) != 0) {
+            continue;
+        }
+        ImFont* merged = io.Fonts->AddFontFromFileTTF(path, sizePx, &cfg, ranges);
+        if (merged) {
+            LOGI("Merged CJK fallback font: {}", path);
+            return true;
+        }
+    }
+    LOGW("Unable to find/load a Windows CJK fallback font. Non-ASCII text may render as missing glyphs.");
+    return false;
+#endif
+}
 
 void formatVideoHms(double secIn, char* out, size_t outSize)
 {
@@ -565,6 +609,8 @@ bool App::initialize(const char* title, int width, int height)
     config.FontDataOwnedByAtlas = false;
     mSmallFont = io.Fonts->AddFontFromMemoryTTF(roboto_regular_ttf, roboto_regular_ttf_size, 13.0f, &config);
     io.FontDefault = io.Fonts->AddFontFromMemoryTTF(roboto_regular_ttf, roboto_regular_ttf_size, 15.0f, &config);
+    mergeWindowsCjkFallbackFont(io, mSmallFont, 13.0f);
+    mergeWindowsCjkFallbackFont(io, io.FontDefault, 15.0f);
 
     config.MergeMode = true;
     config.PixelSnapH = true;
