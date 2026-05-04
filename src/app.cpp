@@ -1510,6 +1510,7 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
     }
 
     const bool splitForVideoCompare = mVideoMode && videoCompareActive() && mCompositeFlags != CompositeFlags::Top;
+    const bool videoCompareSplitSlider = videoCompareActive() && mCompositeFlags == CompositeFlags::Split;
 
     if (videoMouseActive) {
         const bool doingCtrlMmbZoom = !mIsMovingSplitter && ImGui::IsMouseDown(2) && io.KeyCtrl;
@@ -1538,7 +1539,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
         if (!shouldShowSplitter() && !splitForVideoCompare && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
             mImageScale *= (1.0f - glm::roundEven(io.MouseDelta.y) * 0.0078125f);
             mIsScalingImage = true;
-        } else if (mVideoMode && ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(2)) {
+        } else if (mVideoMode && !videoCompareSplitSlider && ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(1)
+            && !ImGui::IsMouseDown(2)) {
             if (ImGui::IsMouseClicked(0) && inContent) {
                 mVideoViewportRmbScrubActive = true;
                 mVideoResumePlaybackAfterViewportScrub = mVideoPlaying;

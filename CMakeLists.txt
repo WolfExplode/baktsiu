@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
+
+# Must be set before project(): Visual Studio generator reads it during project() (MSVC is not set yet).
+if(CMAKE_HOST_WIN32)
+    set(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION "10.0.19041.0" CACHE STRING "Windows SDK version (Visual Studio generator)" FORCE)
+endif()
+
 project(baktsiu)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
