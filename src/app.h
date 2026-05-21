@@ -375,6 +375,8 @@ private:
     int         mVideoLazyDurationGraceFrames = 0;
     double      mVideoPlaybackTimeBank = 0.0;
     double      mVideoComparePlaybackBank = 0.0;
+    double      mVideoCompareBankL = 0.0;
+    double      mVideoCompareBankR = 0.0;
     double      mVideoScrubValue = 0.0;
     std::unique_ptr<MpvGlPlayer> mVideoReader;
     std::unique_ptr<MpvGlPlayer> mVideoReaderB;

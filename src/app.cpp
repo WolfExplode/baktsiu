@@ -1232,6 +1232,8 @@ void    App::onKeyPressed(const ImGuiIO& io)
             mVideoPlaying ^= true;
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
 #endif
     } else if (ImGui::IsKeyPressed(0x51)) { // q
@@ -1473,6 +1475,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
             mVideoPlaying = true;
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
         mVideoResumePlaybackAfterViewportScrub = false;
     }
@@ -1534,6 +1538,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
             mVideoPlaying ^= true;
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
 
         if (!shouldShowSplitter() && !splitForVideoCompare && ImGui::IsMouseDown(0) && ImGui::IsMouseDown(1)) {
@@ -1547,6 +1553,8 @@ void App::updateVideoViewTransform(const ImGuiIO& io)
                 mVideoPlaying = false;
                 mVideoPlaybackTimeBank = 0.0;
                 mVideoComparePlaybackBank = 0.0;
+                mVideoCompareBankL = 0.0;
+                mVideoCompareBankR = 0.0;
                 mVideoLastScrubDecodeTime = ImGui::GetTime();
             }
 
@@ -4259,6 +4267,8 @@ void App::resetVideoDecoderSyncCache()
     mVideoLastSyncedTargetMediaR = -1.0;
     mVideoLastScrubDecodeTime = -1.0e9;
     mVideoComparePlaybackBank = 0.0;
+    mVideoCompareBankL = 0.0;
+    mVideoCompareBankR = 0.0;
 }
 
 void App::stepVideoScrubFiveSeconds(int direction)
@@ -4274,6 +4284,8 @@ void App::stepVideoScrubFiveSeconds(int direction)
     mVideoPlaying = false;
     mVideoPlaybackTimeBank = 0.0;
     mVideoComparePlaybackBank = 0.0;
+    mVideoCompareBankL = 0.0;
+    mVideoCompareBankR = 0.0;
     if (videoCompareActive()) {
         mVideoCompositionT += static_cast<double>(direction) * kJumpSec;
         clampVideoCompositionT();
@@ -4331,6 +4343,8 @@ void App::stepVideoScrubOneFrame(int direction)
     mVideoPlaying = false;
     mVideoPlaybackTimeBank = 0.0;
     mVideoComparePlaybackBank = 0.0;
+    mVideoCompareBankL = 0.0;
+    mVideoCompareBankR = 0.0;
     if (videoCompareActive()) {
         double stepA = mVideoReader->frameDurationSec();
         double stepB =
@@ -4897,21 +4911,40 @@ void App::tickAndUploadVideoFrame(float deltaTime)
             // move (see mediaTimeFromComposition). Otherwise decodeFrame hits eof-reached on the short clip
             // and wrongly stopped playback while the longer clip still has frames.
             for (int i = 0; i < n; ++i) {
+                // Accumulate composition time into per-side banks; only frame-step a side
+                // when its own bank has built up enough for one of its frames. This lets a
+                // 24 fps clip stay at 24 fps even when paired with a 60 fps clip.
+                mVideoCompareBankL += step;
+                mVideoCompareBankR += step;
+
                 const double T = mVideoCompositionT;
                 const double Tnext = T + step;
-                const double tLNow = mediaTimeFromComposition(T, mVideoStartL, dL);
-                const double tRNow = mediaTimeFromComposition(T, mVideoStartR, dR);
-                const double tLNext = mediaTimeFromComposition(Tnext, mVideoStartL, dL);
-                const double tRNext = mediaTimeFromComposition(Tnext, mVideoStartR, dR);
-                const bool needL = tLNext > tLNow + kNeedMediaStepEps;
-                const bool needR = tRNext > tRNow + kNeedMediaStepEps;
+                // Only frame-step when the clip isn't clamped at its end (eof guard).
+                const bool clampedL = mediaTimeFromComposition(Tnext, mVideoStartL, dL)
+                    <= mediaTimeFromComposition(T, mVideoStartL, dL) + kNeedMediaStepEps;
+                const bool clampedR = mediaTimeFromComposition(Tnext, mVideoStartR, dR)
+                    <= mediaTimeFromComposition(T, mVideoStartR, dR) + kNeedMediaStepEps;
+
+                const bool needL = !clampedL && mVideoCompareBankL >= stepA - 1e-9;
+                const bool needR = !clampedR && mVideoCompareBankR >= stepB - 1e-9;
+                if (needL) {
+                    mVideoCompareBankL -= stepA;
+                }
+                if (needR) {
+                    mVideoCompareBankR -= stepB;
+                }
+
                 if (needL && runDecodeL && !mVideoReader->decodeFrame(true)) {
                     mVideoComparePlaybackBank = 0.0;
+                    mVideoCompareBankL = 0.0;
+                    mVideoCompareBankR = 0.0;
                     mVideoPlaying = false;
                     break;
                 }
                 if (needR && runDecodeR && !mVideoReaderB->decodeFrame(true)) {
                     mVideoComparePlaybackBank = 0.0;
+                    mVideoCompareBankL = 0.0;
+                    mVideoCompareBankR = 0.0;
                     mVideoPlaying = false;
                     break;
                 }
@@ -4919,6 +4952,8 @@ void App::tickAndUploadVideoFrame(float deltaTime)
                 if (mVideoCompositionT >= tMax - kEndEps) {
                     mVideoCompositionT = tMax;
                     mVideoComparePlaybackBank = 0.0;
+                    mVideoCompareBankL = 0.0;
+                    mVideoCompareBankR = 0.0;
                     mVideoPlaying = false;
                     break;
                 }
@@ -4935,6 +4970,8 @@ void App::tickAndUploadVideoFrame(float deltaTime)
             mVideoCompositionT = tMax;
             mVideoPlaying = false;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
 
 #if defined(BAKTSIU_DEBUG_BUILD)
@@ -5136,6 +5173,8 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             mVideoPlaying ^= true;
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
     }
     ImGui::SameLine();
@@ -5220,6 +5259,8 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             mVideoPlaying = true;
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
         if (!itemActive && !mVideoViewportRmbScrubActive) {
             mVideoScrubValue = mVideoCompositionT;
@@ -5370,6 +5411,8 @@ void App::initVideoTransportBar(const ImGuiIO& io)
             mVideoPlaying = true;
             mVideoPlaybackTimeBank = 0.0;
             mVideoComparePlaybackBank = 0.0;
+            mVideoCompareBankL = 0.0;
+            mVideoCompareBankR = 0.0;
         }
         if (mVideoPlaying && !itemActive && !mVideoViewportRmbScrubActive) {
             mVideoScrubValue = mVideoReader->positionSec();
