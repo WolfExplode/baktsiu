@@ -3250,11 +3250,18 @@ void App::undoAction()
 void    App::showImportImageDlg()
 {
     static std::vector<std::string> filters = {
+#ifdef USE_JXL
+        "Supported Image Files", "*.bmp; *.exr; *.gif; *.jpg; *.jxl; *.hdr; *.png; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v" ,
+#else
         "Supported Image Files", "*.bmp; *.exr; *.gif; *.jpg; *.hdr; *.png; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v" ,
+#endif
         "BMP (*.BMP)", "*.bmp",
         "OpenEXR (*.EXR)", "*.exr",
         "GIF (*.GIF)", "*.gif",
         "JPEG (*.JPG, *.JPEG)", "*.jpg; *.jpeg",
+#ifdef USE_JXL
+        "JPEG XL (*.JXL)", "*.jxl",
+#endif
         "HDR (*.HDR)", "*.hdr",
         "PNG (*.PNG)", "*.png",
         "Video (*.MP4, *.MOV, ...)", "*.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v",

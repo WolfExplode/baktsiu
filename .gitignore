@@ -67,3 +67,7 @@ imgui*.ini
 # libmpv Windows SDK (local extract of shinchiro mpv-dev *.7z; see third_party/mpv/README.md)
 third_party/mpv/*
 !third_party/mpv/README.md
+
+# libjxl from vcpkg (see third_party/libjxl/README.md)
+third_party/libjxl/*
+!third_party/libjxl/README.md

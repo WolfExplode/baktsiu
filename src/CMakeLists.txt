@@ -13,6 +13,10 @@ if(USE_OPENEXR)
     add_definitions(-DUSE_OPENEXR)
 endif()
 
+if(USE_JXL)
+    add_definitions(-DUSE_JXL)
+endif()
+
 if(WIN32 AND USE_VIDEO)
     add_definitions(-DUSE_VIDEO)
 endif()
@@ -157,12 +161,105 @@ if(WIN32 AND USE_VIDEO)
     list(APPEND VIDEO_LIBS "${MPV_LIBRARY}")
 endif()
 
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS})
+set(JXL_LIBS "")
+set(JXL_DLLS "")
+if(USE_JXL)
+    set(_baktsiu_jxl_repo_default "${CMAKE_SOURCE_DIR}/third_party/libjxl")
+
+    set(JXL_ROOT "" CACHE PATH "Root of libjxl dev tree (include/, lib/, bin/)")
+    set(JXL_INCLUDE_DIR "" CACHE PATH "Directory containing jxl/decode.h")
+    set(JXL_LIBRARY_DIR "" CACHE PATH "Directory containing jxl.lib")
+
+    if(JXL_INCLUDE_DIR AND NOT EXISTS "${JXL_INCLUDE_DIR}/jxl/decode.h")
+        unset(JXL_INCLUDE_DIR CACHE)
+    endif()
+    if(JXL_LIBRARY_DIR AND NOT EXISTS "${JXL_LIBRARY_DIR}/jxl.lib")
+        unset(JXL_LIBRARY_DIR CACHE)
+    endif()
+
+    if(EXISTS "${_baktsiu_jxl_repo_default}/include/jxl/decode.h")
+        set(JXL_INCLUDE_DIR "${_baktsiu_jxl_repo_default}/include" CACHE PATH "Directory containing jxl/decode.h" FORCE)
+    elseif(JXL_ROOT AND EXISTS "${JXL_ROOT}/include/jxl/decode.h")
+        set(JXL_INCLUDE_DIR "${JXL_ROOT}/include" CACHE PATH "Directory containing jxl/decode.h" FORCE)
+    elseif(NOT JXL_INCLUDE_DIR)
+        find_path(_baktsiu_jxl_include
+            NAMES jxl/decode.h
+            HINTS "${JXL_ROOT}" ENV JXL_ROOT
+            PATH_SUFFIXES include "")
+        if(_baktsiu_jxl_include)
+            set(JXL_INCLUDE_DIR "${_baktsiu_jxl_include}" CACHE PATH "Directory containing jxl/decode.h" FORCE)
+        endif()
+    endif()
+
+    if(EXISTS "${_baktsiu_jxl_repo_default}/lib/jxl.lib")
+        set(JXL_LIBRARY_DIR "${_baktsiu_jxl_repo_default}/lib" CACHE PATH "Directory containing jxl.lib" FORCE)
+    elseif(JXL_ROOT AND EXISTS "${JXL_ROOT}/lib/jxl.lib")
+        set(JXL_LIBRARY_DIR "${JXL_ROOT}/lib" CACHE PATH "Directory containing jxl.lib" FORCE)
+    elseif(NOT JXL_LIBRARY_DIR)
+        find_path(_baktsiu_jxl_libdir
+            NAMES jxl.lib
+            HINTS "${JXL_ROOT}/lib" "${JXL_ROOT}" ENV JXL_ROOT
+            PATH_SUFFIXES lib lib/x64 "")
+        if(_baktsiu_jxl_libdir)
+            set(JXL_LIBRARY_DIR "${_baktsiu_jxl_libdir}" CACHE PATH "Directory containing jxl.lib" FORCE)
+        endif()
+    endif()
+
+    if(NOT JXL_INCLUDE_DIR OR NOT JXL_LIBRARY_DIR)
+        message(FATAL_ERROR
+            "USE_JXL is ON but libjxl was not found.\n"
+            "  Install with vcpkg (libjxl:x64-windows) and copy into third_party/libjxl\n"
+            "  (see third_party/libjxl/README.md), or set JXL_ROOT / JXL_INCLUDE_DIR + JXL_LIBRARY_DIR,\n"
+            "  or turn off JPEG XL: -DUSE_JXL=OFF")
+    endif()
+
+    target_include_directories(${PROJECT_NAME} PRIVATE "${JXL_INCLUDE_DIR}")
+    foreach(_baktsiu_jxl_lib jxl jxl_cms jxl_threads)
+        if(EXISTS "${JXL_LIBRARY_DIR}/${_baktsiu_jxl_lib}.lib")
+            list(APPEND JXL_LIBS "${JXL_LIBRARY_DIR}/${_baktsiu_jxl_lib}.lib")
+        endif()
+    endforeach()
+    if(JXL_LIBS STREQUAL "")
+        message(FATAL_ERROR "USE_JXL: no jxl*.lib found in JXL_LIBRARY_DIR=${JXL_LIBRARY_DIR}")
+    endif()
+
+    set(_baktsiu_jxl_bin_hints)
+    if(JXL_ROOT)
+        list(APPEND _baktsiu_jxl_bin_hints "${JXL_ROOT}/bin" "${JXL_ROOT}")
+    endif()
+    list(APPEND _baktsiu_jxl_bin_hints "${_baktsiu_jxl_repo_default}/bin" "${_baktsiu_jxl_repo_default}")
+    if(JXL_LIBRARY_DIR)
+        list(APPEND _baktsiu_jxl_bin_hints "${JXL_LIBRARY_DIR}/../bin")
+    endif()
+    if(DEFINED ENV{JXL_ROOT})
+        list(APPEND _baktsiu_jxl_bin_hints "$ENV{JXL_ROOT}/bin" "$ENV{JXL_ROOT}")
+    endif()
+    file(GLOB _baktsiu_jxl_dlls
+        LIST_DIRECTORIES false
+        ${_baktsiu_jxl_bin_hints}/jxl*.dll
+        ${_baktsiu_jxl_bin_hints}/brotli*.dll
+        ${_baktsiu_jxl_bin_hints}/hwy.dll
+        ${_baktsiu_jxl_bin_hints}/lcms2-2.dll)
+    if(_baktsiu_jxl_dlls)
+        list(REMOVE_DUPLICATES _baktsiu_jxl_dlls)
+        set(JXL_DLLS "${_baktsiu_jxl_dlls}" CACHE INTERNAL "libjxl runtime DLLs for post-build copy")
+    endif()
+endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS} ${JXL_LIBS})
 
 if(WIN32 AND USE_VIDEO AND MPV_DLL)
     add_custom_command(
         TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MPV_DLL}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+endif()
+
+if(WIN32 AND USE_JXL AND JXL_DLLS)
+    foreach(_baktsiu_jxl_dll ${JXL_DLLS})
+        add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_baktsiu_jxl_dll}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+    endforeach()
 endif()
 
 if(USE_OPENEXR AND WIN32)

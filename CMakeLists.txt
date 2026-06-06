@@ -16,8 +16,10 @@ option(EMBED_SHADERS "Embed shaders into binary" ON)
 # Windows: ON by default (requires libmpv: MPV_ROOT or MPV_INCLUDE_DIR + MPV_LIBRARY). Set OFF to build without video.
 if(WIN32)
     option(USE_VIDEO "Video playback via libmpv (OpenGL render)" ON)
+    option(USE_JXL "JPEG XL (.jxl) via libjxl" ON)
 else()
     option(USE_VIDEO "Video playback via libmpv (OpenGL render)" OFF)
+    option(USE_JXL "JPEG XL (.jxl) via libjxl" OFF)
 endif()
 
 if(USE_OPENEXR AND NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/ext/openexr/OpenEXR")

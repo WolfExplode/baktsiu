@@ -20,6 +20,10 @@
 #include <thread>
 #endif
 
+#ifdef USE_JXL
+#include <jxl/decode.h>
+#endif
+
 namespace baktsiu
 {
 
@@ -183,6 +187,69 @@ TextureSPtr createTextureForFile(const std::string& filepath)
     return std::make_shared<Texture>();
 }
 
+#ifdef USE_JXL
+namespace {
+
+bool loadJxlFromMemory(const std::vector<uint8_t>& bytes, int& width, int& height, uint8_t*& buffer)
+{
+    JxlDecoder* dec = JxlDecoderCreate(nullptr);
+    if (!dec) {
+        return false;
+    }
+
+    if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
+        JxlDecoderDestroy(dec);
+        return false;
+    }
+
+    if (JxlDecoderSetInput(dec, bytes.data(), bytes.size()) != JXL_DEC_SUCCESS) {
+        JxlDecoderDestroy(dec);
+        return false;
+    }
+    JxlDecoderCloseInput(dec);
+
+    const JxlPixelFormat format = {4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+    bool gotImage = false;
+
+    while (true) {
+        const JxlDecoderStatus status = JxlDecoderProcessInput(dec);
+        if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT) {
+            break;
+        }
+        if (status == JXL_DEC_BASIC_INFO) {
+            JxlBasicInfo info;
+            if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) {
+                break;
+            }
+            width = static_cast<int>(info.xsize);
+            height = static_cast<int>(info.ysize);
+        } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+            size_t bufferSize = 0;
+            if (JxlDecoderImageOutBufferSize(dec, &format, &bufferSize) != JXL_DEC_SUCCESS) {
+                break;
+            }
+            buffer = static_cast<uint8_t*>(stbi__malloc(bufferSize));
+            if (!buffer) {
+                break;
+            }
+            if (JxlDecoderSetImageOutBuffer(dec, &format, buffer, bufferSize) != JXL_DEC_SUCCESS) {
+                stbi_image_free(buffer);
+                buffer = nullptr;
+                break;
+            }
+        } else if (status == JXL_DEC_FULL_IMAGE) {
+            gotImage = true;
+            break;
+        }
+    }
+
+    JxlDecoderDestroy(dec);
+    return gotImage && buffer != nullptr && width > 0 && height > 0;
+}
+
+}  // namespace
+#endif
+
 bool Texture::isSupported(const std::string& filepath)
 {
     return getImageType(filepath) != ImageType::Unknown;
@@ -194,6 +261,23 @@ ImageType Texture::getImageType(const std::string &filepath)
 
     FILE *f = stbi__fopen(filepath.c_str(), "rb");
     if (!f) return type;
+
+#ifdef USE_JXL
+    {
+        uint8_t header[32] = {};
+        const size_t readCount = fread(header, 1, sizeof(header), f);
+        const JxlSignature sig = JxlSignatureCheck(header, readCount);
+        if (sig == JXL_SIG_CODESTREAM || sig == JXL_SIG_CONTAINER) {
+            fclose(f);
+            return ImageType::JXL;
+        }
+    }
+#endif
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return type;
+    }
 
     stbi__context s;
     stbi__start_file(&s, f);
@@ -214,14 +298,16 @@ ImageType Texture::getImageType(const std::string &filepath)
 
     if (type != ImageType::Unknown) {
         fclose(f);
+        return type;
     }
+
 #ifdef USE_OPENEXR
-    else if (Imf::isOpenExrFile(filepath.c_str())) {
-        // Check other derived type like EXR, DNG.
+    if (Imf::isOpenExrFile(filepath.c_str())) {
         type = ImageType::OPENEXR;
     }
 #endif
 
+    fclose(f);
     return type;
 }
 
@@ -261,6 +347,34 @@ bool Texture::loadFromFile(const std::string& filepath)
         
         mPixelDataType = GL_HALF_FLOAT;
         mImageFormat = GL_RGBA16F;
+    }
+#endif
+#ifdef USE_JXL
+    else if (imageType == ImageType::JXL) {
+        std::ifstream in(filepath, std::ios::binary);
+        if (!in) {
+            return false;
+        }
+        in.seekg(0, std::ios::end);
+        const std::streamoff sizeOff = in.tellg();
+        if (sizeOff <= 0) {
+            return false;
+        }
+        in.seekg(0, std::ios::beg);
+
+        std::vector<uint8_t> bytes(static_cast<size_t>(sizeOff));
+        in.read(reinterpret_cast<char*>(bytes.data()), sizeOff);
+        if (!in) {
+            return false;
+        }
+
+        if (!loadJxlFromMemory(bytes, mWidth, mHeight, buffer)) {
+            return false;
+        }
+
+        mChannelNum = 4;
+        mPixelDataType = GL_UNSIGNED_BYTE;
+        mImageFormat = GL_RGBA8;
     }
 #endif
     else {

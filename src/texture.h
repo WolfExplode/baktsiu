@@ -23,7 +23,8 @@ enum class ImageType : char
     HDR,
     TGA,
     OPENEXR,
-    DNG
+    DNG,
+    JXL
 };
 
 
