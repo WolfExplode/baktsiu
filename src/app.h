@@ -362,7 +362,7 @@ private:
 
     bool        mShowImagePropWindow = false;
     bool        mPopupImagePropWindow = false;
-    bool        mUseLinearFilter = true;
+    bool        mUseLinearFilter = false;
     bool        mShowImageNameOverlay = true;
     bool        mShowPixelMarker = false;
     bool        mSupportComputeShader = false;

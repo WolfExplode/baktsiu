@@ -782,6 +782,9 @@ void App::processTextureUploadTasks()
 
         if (mCmpImageIndex == -1 && mTopImageIndex >= 1) {
             mCmpImageIndex = 0;
+            if (mCompositeFlags == CompositeFlags::Top) {
+                mCompositeFlags = CompositeFlags::Split;
+            }
         }
 
         mUpdateImageSelection = false;
@@ -839,7 +842,7 @@ void App::applyInitialWindowAspectFromSize(float mediaW, float mediaH)
 
 void App::run(CompositeFlags initFlags)
 {
-    bool shouldChangeComposition = true;
+    bool shouldChangeComposition = (initFlags != CompositeFlags::Top);
 
     // Spawn worker threads to handle import images.
     const unsigned int workerNum = std::thread::hardware_concurrency();
@@ -3727,6 +3730,7 @@ void    App::onFileDrop(int count, const char* filepaths[])
 
     if (!videoPaths.empty()) {
 #if defined(USE_VIDEO)
+        const bool hadVideoR = (mVideoIndexR >= 0);
         std::vector<int> addedIdx;
         addedIdx.reserve(videoPaths.size());
         for (const std::string& p : videoPaths) {
@@ -3741,6 +3745,9 @@ void    App::onFileDrop(int count, const char* filepaths[])
             }
         }
         applyImportedVideoListSelection(addedIdx);
+        if (!hadVideoR && mVideoIndexR >= 0 && mCompositeFlags == CompositeFlags::Top) {
+            mCompositeFlags = CompositeFlags::Split;
+        }
         openVideosFromSelection();
 #else
         LOGW("Video playback is disabled in this build (USE_VIDEO).");
@@ -3749,7 +3756,6 @@ void    App::onFileDrop(int count, const char* filepaths[])
         importImageFiles(filepathArray, true);
     }
 }
-
 void    App::openSession(const std::string& filepath)
 {
     fx::gltf::Document sessionFile = fx::gltf::LoadFromText(filepath);
@@ -4463,8 +4469,13 @@ void App::applyImportedVideoListSelection(const std::vector<int>& addedListIndic
         return;
     }
     if (addedListIndices.size() == 1) {
-        mVideoIndexL = addedListIndices[0];
-        mVideoIndexR = -1;
+        const int newIdx = addedListIndices[0];
+        if (mVideoIndexL >= 0 && mVideoIndexL != newIdx) {
+            mVideoIndexR = newIdx;
+        } else {
+            mVideoIndexL = newIdx;
+            mVideoIndexR = -1;
+        }
     } else {
         mVideoIndexL = addedListIndices[0];
         mVideoIndexR = addedListIndices[1];
