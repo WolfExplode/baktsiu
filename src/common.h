@@ -24,7 +24,7 @@
 #define LOGD(...) spdlog::debug(__VA_ARGS__);
 
 #define CHECK_AND_RETURN_IT(status, msg) \
-do { if (!status)  LOGE(msg); } while (0)
+do { if (!(status)) { LOGE(msg); return false; } } while (0)
 
 #if defined USE_NVTX
 #include <nvToolsExt.h>

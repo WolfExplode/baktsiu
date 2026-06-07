@@ -36,8 +36,6 @@ public:
     // Return location of uniform.
     GLint   uniform(const std::string& name) const;
 
-    /// Initialize a uniform parameter with a 4x4 matrix (float)
-    template <typename T>
     void setUniform(const std::string& name, const Mat4f& mat) {
         glUniformMatrix4fv(uniform(name), 1, GL_FALSE, &mat[0][0]);
     }
@@ -47,8 +45,6 @@ public:
         glUniform4fv(uniform(name), static_cast<GLsizei>(values.size()), static_cast<const float*>(&values[0].x));
     }
 
-    /// Initialize a uniform parameter with a 3x3 matrix (float)
-    template <typename T>
     void setUniform(const std::string& name, const Mat3f& mat) {
         glUniformMatrix3fv(uniform(name), 1, GL_FALSE, &mat[0][0]);
     }

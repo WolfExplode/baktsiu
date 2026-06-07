@@ -95,7 +95,7 @@ public:
         mImageFormat = GL_RGBA8;
 
         mFilePath = filepath;
-        mFileName = filepath.substr(filepath.find_last_of("/") + 1);
+        mFileName = filepath.substr(filepath.find_last_of("/\\") + 1);
 
         mCurFrame = 0;
         mTimeBankMs = 0.0f;

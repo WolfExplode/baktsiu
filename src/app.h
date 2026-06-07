@@ -2,15 +2,17 @@
 #define BAKTSIU_APP_H_
 
 #include "common.h"
-#include "image.h"
-#include "mpv_gl_player.h"
+#include "media_source.h"
 #include "shader.h"
+#include "static_image_source.h"
 #include "texture.h"
 #include "texture_pool.h"
+#include "video_source.h"
 #include "view.h"
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -133,17 +135,17 @@ private:
     // Initialize related bitmap and uv info for text.
     void    initDigitCharData(const unsigned char* data);
 
-    void    initToolbar();
+    void    renderToolbar();
 
-    // Create toogle handle for image property window.
-    // Return true if the handle is hovered by mouse cursor.
-    bool    initImagePropWindowHandle(float handleWidth, bool& showPropWindow);
+    // Create toggle handle for the property panel.
+    // Returns true if the handle is hovered by the mouse cursor.
+    bool    renderPropWindowHandle(float handleWidth, bool& showPropWindow);
 
-    void    initImagePropWindow();
+    void    renderPropertiesPanel();
 
-    void    initFooter();
+    void    renderFooter();
 
-    void    initHomeWindow(const char* name);
+    void    renderInfoPopup(const char* name);
 
     void    showImageProperties();
 
@@ -180,10 +182,8 @@ private:
     void    computeImageStatistics(
         const RenderTexture& texture, float valueScale, GLuint histGpuTex, std::array<int, 768>& histCpu);
 
-#if defined(USE_VIDEO)
     void computeVideoTextureHistogram(
         GLuint rgba8Tex, int width, int height, GLuint histGpuTex, std::array<int, 768>& histCpu);
-#endif
 
     // Reset image transform to viewport center.
     void    resetImageTransform(const Vec2f& imgSize, bool fitWindow = false);
@@ -201,7 +201,10 @@ private:
 
     void    undoAction();
 
-    Image*  getTopImage();
+    StaticImageSource*       getTopImage();
+    const StaticImageSource* getTopImage() const;
+    StaticImageSource*       getCmpImage();
+    const StaticImageSource* getCmpImage() const;
 
     void    removeTopImage(bool recordAction);
 
@@ -217,7 +220,7 @@ private:
     // Save compare session with file extension .bts
     void    saveSession(const std::string& filepath);
 
-    void    gradingTexImage(Image& image, int renderTexIdx);
+    void    gradingTexImage(StaticImageSource& image, int renderTexIdx);
 
     // Return the width of property window at right hand side.
     float   getPropWindowWidth() const;
@@ -236,6 +239,13 @@ private:
 
     void    exitVideoMode();
 
+    // Return the active left/right VideoSource from mMediaList, or null if not video mode.
+    VideoSource*       videoSource();
+    const VideoSource* videoSource() const;
+    VideoSource*       videoSourceB();
+    const VideoSource* videoSourceB() const;
+    bool               isVideoMode() const;
+
     int     addVideoPath(const std::string& filepath);
 
     void    openVideosFromSelection();
@@ -243,29 +253,24 @@ private:
     // After addVideoPath batch: in Top or SideBySide, focus list rows on the new paths; Split keeps L/R from fill logic.
     void    applyImportedVideoListSelection(const std::vector<int>& addedListIndices);
 
-    void    initVideoTransportBar(const ImGuiIO& io);
+    void    renderVideoTransportBar(const ImGuiIO& io);
 
     void    tickAndUploadVideoFrame(float deltaTime);
 
     void    renderVideoBlit(const ImGuiIO& io);
 
-    void    recreateVideoTexture();
-
     void    uploadVideoTexture();
 
     bool    videoCompareActive() const;
 
-#if defined(USE_VIDEO)
     // Match renderVideoBlit: drawable content rect below toolbar / above transport + footer.
     void    getVideoBlitContentLayout(const ImGuiIO& io, Vec2f& outContentOrigin, Vec2f& outContentSize) const;
     bool    getSingleVideoPixelAtMouse(const ImGuiIO& io, Vec2f& outImagePx) const;
     bool    getCompareSideVideoPixelAtMouse(const ImGuiIO& io, int side, Vec2f& outImagePx) const;
 
     void    syncVideoViewsLayout(const ImGuiIO& io);
-    void    updateVideoViewTransform(const ImGuiIO& io);
     void    resetVideoViewTransform(bool fitWindow = false);
     Vec2f   videoRefDisplaySizeForLayout() const;
-#endif
 
     void    recomputeVideoScrubBounds(double& outMin, double& outMax) const;
 
@@ -282,13 +287,11 @@ private:
 
     void    swapVideoSides();
 
-    void    recreateVideoTextureB();
-
     void    uploadVideoTextureB();
 
-    using ImageUPtr = std::unique_ptr<Image>;
+    using MediaUPtr = std::unique_ptr<MediaSource>;
 
-    std::vector<ImageUPtr>      mImageList;
+    std::vector<MediaUPtr>      mMediaList;
     std::deque<Action>          mActionStack;
     Action                      mCurAction;
     TexturePool                 mTexturePool;
@@ -321,18 +324,13 @@ private:
     CompositeFlags      mCompositeFlags = CompositeFlags::Top;
     PixelMarkerFlags    mPixelMarkerFlags = PixelMarkerFlags::Default;
 
-    // Image transformation
+    // Image / video transformation (unified — video uses the same mView/mColumnViews)
     View        mView;
     View        mColumnViews[2];    // Views for side by side mode.
-#if defined(USE_VIDEO)
-    View        mVideoView;
-    View        mVideoColumnViews[2];
-    float       mVideoPrevScale = -1.0f;
-    // Fit reset must run after syncVideoViewsLayout() so bottom padding includes the transport bar.
-    bool        mVideoPendingViewFitReset = false;
-#endif
     float       mImageScale = 1.0f;
-    float       mPrevImageScale = -1.0f;
+    float       mPrevScale = -1.0f;     // pre-sniper scale; shared between image and video modes
+    // Fit reset must run after syncVideoViewsLayout() so bottom padding includes the transport bar.
+    bool        mPendingViewFitReset = false;
 
     int         mTopImageIndex = -1;
     int         mCmpImageIndex = -1;
@@ -351,6 +349,13 @@ private:
     float       mDisplayGamma = 2.2f;
     float       mExposureValue = 0.0f;
 
+    // RMB window-drag state (was static in run())
+    bool        mRmbWindowDragActive = false;
+    double      mRmbDragStartCursorScreenX = 0.0;
+    double      mRmbDragStartCursorScreenY = 0.0;
+    int         mRmbDragStartWindowX = 0;
+    int         mRmbDragStartWindowY = 0;
+
     bool        mIsMovingSplitter = false;
     bool        mIsScalingImage = false;
     bool        mCtrlMmbZoomPivotLocked = false;
@@ -360,6 +365,29 @@ private:
     bool        mShowPixelValues = false;
     bool        mAboutToTerminate = false;
 
+    // Pixel-sniper zoom
+    bool        mIsInSniperMode = false;
+
+    // Sub-pixel pan residual for Alt+MMB pixel-snap in column views
+    Vec2f       mPanResidual = Vec2f(0.0f);
+
+    // Auto-centering toolbar width measurement (was static in renderToolbar)
+    float       mCenteredToolbarWidth = 506.0f;
+
+    // Image-list drag-to-reorder (was static in renderPropertiesPanel)
+    bool        mIsDraggingImageItem = false;
+    std::unique_ptr<Action> mMoveAction;
+
+    // Footer file-size cache: avoid stat() on every frame
+    std::string     mFooterCachePathVL, mFooterCachePathVR;
+    std::int64_t    mFooterCacheBytesVL = -1;
+    std::int64_t    mFooterCacheBytesVR = -1;
+    std::string     mFooterCachePathVSingle;
+    std::int64_t    mFooterCacheBytesVSingle = -1;
+    std::string     mFooterCachePathIL, mFooterCachePathIR;
+    std::int64_t    mFooterCacheBytesIL = -1;
+    std::int64_t    mFooterCacheBytesIR = -1;
+
     bool        mShowImagePropWindow = false;
     bool        mPopupImagePropWindow = false;
     bool        mUseLinearFilter = false;
@@ -368,7 +396,11 @@ private:
     bool        mSupportComputeShader = false;
     bool        mUpdateImageSelection = false;
 
-    bool        mVideoMode = false;
+    // mTopImageIndex / mCmpImageIndex serve double duty:
+    //   image mode  → index into mMediaList (StaticImageSource)
+    //   video mode  → index into mMediaList (VideoSource, left / right decoder)
+    // isVideoMode() / videoSource() / videoSourceB() encapsulate the distinction.
+
     bool        mVideoPlaying = false;
     bool        mInitialMediaAspectApplied = false;
     // Defer lazy duration probe so the first paint after open is not blocked by a full-stream read.
@@ -378,15 +410,6 @@ private:
     double      mVideoCompareBankL = 0.0;
     double      mVideoCompareBankR = 0.0;
     double      mVideoScrubValue = 0.0;
-    std::unique_ptr<MpvGlPlayer> mVideoReader;
-    std::unique_ptr<MpvGlPlayer> mVideoReaderB;
-    std::vector<std::string> mVideoPaths;
-    int         mVideoIndexL = -1;
-    int         mVideoIndexR = -1;
-    std::string mVideoPathL;
-    std::string mVideoPathR;
-    GLuint      mVideoTexture = 0;
-    GLuint      mVideoTextureB = 0;
     double      mVideoCompositionT = 0.0;
     double      mVideoStartL = 0.0;
     double      mVideoStartR = 0.0;
@@ -398,7 +421,7 @@ private:
     // Snapshot when a scrub drag begins; used to resume playback after release if it was playing.
     bool        mVideoPlayingBeforeScrub = false;
     // Right-drag scrub on the video viewport (not the transport slider).
-    bool        mVideoViewportRmbScrubActive = false;
+    bool        mViewportRmbScrubActive = false;
     bool        mVideoResumePlaybackAfterViewportScrub = false;
     bool        mVideoLogPipelineTiming = false;
     float       mVideoDbgLastUploadLMs = 0.f;
@@ -408,9 +431,8 @@ private:
     float       mVideoDbgLastDriftLMs = 0.f;
     float       mVideoDbgLastDriftRMs = 0.f;
     double      mVideoDbgLastConsoleBeatSec = -1.0e9;
-    // Presentation-only left/right swap for instant switching while playing.
-    // When true, the renderer (and UI "L/R" meaning) are swapped, but the underlying decoders
-    // remain in their original slots (mVideoReader/mVideoReaderB).
+    // Presentation-only left/right swap: renderer sees decoders flipped, but mTopImageIndex /
+    // mCmpImageIndex keep pointing at the physical decoder slots (no reopen required).
     bool        mVideoSwapPresentationLR = false;
     // Vertical flip (invert along horizontal midline) for on-screen left / right media.
     bool        mFlipPresentMediaVert[2] = {false, false};
