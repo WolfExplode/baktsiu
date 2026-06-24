@@ -24,7 +24,13 @@ enum class ImageType : char
     TGA,
     OPENEXR,
     DNG,
-    JXL
+    JXL,
+    AVIF,
+    WEBP,
+    TIFF,
+    SVG,
+    ICO,
+    DDS
 };
 
 

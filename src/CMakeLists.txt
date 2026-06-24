@@ -17,6 +17,27 @@ if(USE_JXL)
     add_definitions(-DUSE_JXL)
 endif()
 
+if(USE_AVIF)
+    add_definitions(-DUSE_AVIF)
+endif()
+
+if(USE_WEBP)
+    add_definitions(-DUSE_WEBP)
+endif()
+
+if(USE_TIFF)
+    add_definitions(-DUSE_TIFF)
+endif()
+
+if(USE_SVG)
+    add_definitions(-DUSE_SVG)
+endif()
+
+if(USE_DDS)
+    add_definitions(-DUSE_DDS)
+    # gli is header-only; ext/ is already in EXT_INCLUDE_DIRS
+endif()
+
 if(WIN32 AND USE_VIDEO)
     add_definitions(-DUSE_VIDEO)
 endif()
@@ -246,7 +267,337 @@ if(USE_JXL)
     endif()
 endif()
 
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS} ${JXL_LIBS})
+set(AVIF_LIBS "")
+set(AVIF_DLLS "")
+if(USE_AVIF)
+    set(_baktsiu_avif_repo_default "${CMAKE_SOURCE_DIR}/third_party/libavif")
+
+    set(AVIF_ROOT "" CACHE PATH "Root of libavif dev tree (include/, lib/, bin/)")
+    set(AVIF_INCLUDE_DIR "" CACHE PATH "Directory containing avif/avif.h")
+    set(AVIF_LIBRARY_DIR "" CACHE PATH "Directory containing avif.lib")
+
+    if(AVIF_INCLUDE_DIR AND NOT EXISTS "${AVIF_INCLUDE_DIR}/avif/avif.h")
+        unset(AVIF_INCLUDE_DIR CACHE)
+    endif()
+    if(AVIF_LIBRARY_DIR AND NOT EXISTS "${AVIF_LIBRARY_DIR}/avif.lib")
+        unset(AVIF_LIBRARY_DIR CACHE)
+    endif()
+
+    if(EXISTS "${_baktsiu_avif_repo_default}/include/avif/avif.h")
+        set(AVIF_INCLUDE_DIR "${_baktsiu_avif_repo_default}/include" CACHE PATH "Directory containing avif/avif.h" FORCE)
+    elseif(AVIF_ROOT AND EXISTS "${AVIF_ROOT}/include/avif/avif.h")
+        set(AVIF_INCLUDE_DIR "${AVIF_ROOT}/include" CACHE PATH "Directory containing avif/avif.h" FORCE)
+    elseif(NOT AVIF_INCLUDE_DIR)
+        find_path(_baktsiu_avif_include
+            NAMES avif/avif.h
+            HINTS "${AVIF_ROOT}" ENV AVIF_ROOT
+            PATH_SUFFIXES include "")
+        if(_baktsiu_avif_include)
+            set(AVIF_INCLUDE_DIR "${_baktsiu_avif_include}" CACHE PATH "Directory containing avif/avif.h" FORCE)
+        endif()
+    endif()
+
+    if(EXISTS "${_baktsiu_avif_repo_default}/lib/avif.lib")
+        set(AVIF_LIBRARY_DIR "${_baktsiu_avif_repo_default}/lib" CACHE PATH "Directory containing avif.lib" FORCE)
+    elseif(AVIF_ROOT AND EXISTS "${AVIF_ROOT}/lib/avif.lib")
+        set(AVIF_LIBRARY_DIR "${AVIF_ROOT}/lib" CACHE PATH "Directory containing avif.lib" FORCE)
+    elseif(NOT AVIF_LIBRARY_DIR)
+        find_path(_baktsiu_avif_libdir
+            NAMES avif.lib
+            HINTS "${AVIF_ROOT}/lib" "${AVIF_ROOT}" ENV AVIF_ROOT
+            PATH_SUFFIXES lib lib/x64 "")
+        if(_baktsiu_avif_libdir)
+            set(AVIF_LIBRARY_DIR "${_baktsiu_avif_libdir}" CACHE PATH "Directory containing avif.lib" FORCE)
+        endif()
+    endif()
+
+    if(NOT AVIF_INCLUDE_DIR OR NOT AVIF_LIBRARY_DIR)
+        message(FATAL_ERROR
+            "USE_AVIF is ON but libavif was not found.\n"
+            "  Install with vcpkg (libavif:x64-windows) and copy into third_party/libavif\n"
+            "  or set AVIF_ROOT / AVIF_INCLUDE_DIR + AVIF_LIBRARY_DIR,\n"
+            "  or turn off AVIF: -DUSE_AVIF=OFF")
+    endif()
+
+    target_include_directories(${PROJECT_NAME} PRIVATE "${AVIF_INCLUDE_DIR}")
+    if(EXISTS "${AVIF_LIBRARY_DIR}/avif.lib")
+        list(APPEND AVIF_LIBS "${AVIF_LIBRARY_DIR}/avif.lib")
+    endif()
+    if(AVIF_LIBS STREQUAL "")
+        message(FATAL_ERROR "USE_AVIF: avif.lib not found in AVIF_LIBRARY_DIR=${AVIF_LIBRARY_DIR}")
+    endif()
+
+    set(_baktsiu_avif_bin_hints)
+    if(AVIF_ROOT)
+        list(APPEND _baktsiu_avif_bin_hints "${AVIF_ROOT}/bin" "${AVIF_ROOT}")
+    endif()
+    list(APPEND _baktsiu_avif_bin_hints "${_baktsiu_avif_repo_default}/bin" "${_baktsiu_avif_repo_default}")
+    if(AVIF_LIBRARY_DIR)
+        list(APPEND _baktsiu_avif_bin_hints "${AVIF_LIBRARY_DIR}/../bin")
+    endif()
+    if(DEFINED ENV{AVIF_ROOT})
+        list(APPEND _baktsiu_avif_bin_hints "$ENV{AVIF_ROOT}/bin" "$ENV{AVIF_ROOT}")
+    endif()
+    file(GLOB _baktsiu_avif_dlls
+        LIST_DIRECTORIES false
+        ${_baktsiu_avif_bin_hints}/avif*.dll
+        ${_baktsiu_avif_bin_hints}/dav1d.dll
+        ${_baktsiu_avif_bin_hints}/libyuv.dll
+        ${_baktsiu_avif_bin_hints}/jpeg*.dll
+        ${_baktsiu_avif_bin_hints}/turbojpeg.dll)
+    if(_baktsiu_avif_dlls)
+        list(REMOVE_DUPLICATES _baktsiu_avif_dlls)
+        set(AVIF_DLLS "${_baktsiu_avif_dlls}" CACHE INTERNAL "libavif runtime DLLs for post-build copy")
+    endif()
+endif()
+
+set(WEBP_LIBS "")
+set(WEBP_DLLS "")
+if(USE_WEBP)
+    set(_baktsiu_webp_repo_default "${CMAKE_SOURCE_DIR}/third_party/libwebp")
+
+    set(WEBP_ROOT "" CACHE PATH "Root of libwebp dev tree (include/, lib/, bin/)")
+    set(WEBP_INCLUDE_DIR "" CACHE PATH "Directory containing webp/decode.h")
+    set(WEBP_LIBRARY_DIR "" CACHE PATH "Directory containing webp.lib")
+
+    if(WEBP_INCLUDE_DIR AND NOT EXISTS "${WEBP_INCLUDE_DIR}/webp/decode.h")
+        unset(WEBP_INCLUDE_DIR CACHE)
+    endif()
+    if(WEBP_LIBRARY_DIR AND NOT EXISTS "${WEBP_LIBRARY_DIR}/libwebp.lib")
+        unset(WEBP_LIBRARY_DIR CACHE)
+    endif()
+
+    if(EXISTS "${_baktsiu_webp_repo_default}/include/webp/decode.h")
+        set(WEBP_INCLUDE_DIR "${_baktsiu_webp_repo_default}/include" CACHE PATH "Directory containing webp/decode.h" FORCE)
+    elseif(WEBP_ROOT AND EXISTS "${WEBP_ROOT}/include/webp/decode.h")
+        set(WEBP_INCLUDE_DIR "${WEBP_ROOT}/include" CACHE PATH "Directory containing webp/decode.h" FORCE)
+    elseif(NOT WEBP_INCLUDE_DIR)
+        find_path(_baktsiu_webp_include
+            NAMES webp/decode.h
+            HINTS "${WEBP_ROOT}" ENV WEBP_ROOT
+            PATH_SUFFIXES include "")
+        if(_baktsiu_webp_include)
+            set(WEBP_INCLUDE_DIR "${_baktsiu_webp_include}" CACHE PATH "Directory containing webp/decode.h" FORCE)
+        endif()
+    endif()
+
+    if(EXISTS "${_baktsiu_webp_repo_default}/lib/libwebp.lib")
+        set(WEBP_LIBRARY_DIR "${_baktsiu_webp_repo_default}/lib" CACHE PATH "Directory containing libwebp.lib" FORCE)
+    elseif(WEBP_ROOT AND EXISTS "${WEBP_ROOT}/lib/libwebp.lib")
+        set(WEBP_LIBRARY_DIR "${WEBP_ROOT}/lib" CACHE PATH "Directory containing libwebp.lib" FORCE)
+    elseif(NOT WEBP_LIBRARY_DIR)
+        find_path(_baktsiu_webp_libdir
+            NAMES libwebp.lib
+            HINTS "${WEBP_ROOT}/lib" "${WEBP_ROOT}" ENV WEBP_ROOT
+            PATH_SUFFIXES lib lib/x64 "")
+        if(_baktsiu_webp_libdir)
+            set(WEBP_LIBRARY_DIR "${_baktsiu_webp_libdir}" CACHE PATH "Directory containing libwebp.lib" FORCE)
+        endif()
+    endif()
+
+    if(NOT WEBP_INCLUDE_DIR OR NOT WEBP_LIBRARY_DIR)
+        message(FATAL_ERROR
+            "USE_WEBP is ON but libwebp was not found.\n"
+            "  Install with vcpkg (libwebp:x64-windows) and copy into third_party/libwebp\n"
+            "  or set WEBP_ROOT / WEBP_INCLUDE_DIR + WEBP_LIBRARY_DIR,\n"
+            "  or turn off WebP: -DUSE_WEBP=OFF")
+    endif()
+
+    target_include_directories(${PROJECT_NAME} PRIVATE "${WEBP_INCLUDE_DIR}")
+    foreach(_baktsiu_webp_lib libwebp libwebpdecoder)
+        if(EXISTS "${WEBP_LIBRARY_DIR}/${_baktsiu_webp_lib}.lib")
+            list(APPEND WEBP_LIBS "${WEBP_LIBRARY_DIR}/${_baktsiu_webp_lib}.lib")
+        endif()
+    endforeach()
+    if(WEBP_LIBS STREQUAL "")
+        message(FATAL_ERROR "USE_WEBP: no libwebp*.lib found in WEBP_LIBRARY_DIR=${WEBP_LIBRARY_DIR}")
+    endif()
+
+    set(_baktsiu_webp_bin_hints)
+    if(WEBP_ROOT)
+        list(APPEND _baktsiu_webp_bin_hints "${WEBP_ROOT}/bin" "${WEBP_ROOT}")
+    endif()
+    list(APPEND _baktsiu_webp_bin_hints "${_baktsiu_webp_repo_default}/bin" "${_baktsiu_webp_repo_default}")
+    if(WEBP_LIBRARY_DIR)
+        list(APPEND _baktsiu_webp_bin_hints "${WEBP_LIBRARY_DIR}/../bin")
+    endif()
+    if(DEFINED ENV{WEBP_ROOT})
+        list(APPEND _baktsiu_webp_bin_hints "$ENV{WEBP_ROOT}/bin" "$ENV{WEBP_ROOT}")
+    endif()
+    file(GLOB _baktsiu_webp_dlls
+        LIST_DIRECTORIES false
+        ${_baktsiu_webp_bin_hints}/libwebp.dll
+        ${_baktsiu_webp_bin_hints}/libwebpdecoder.dll
+        ${_baktsiu_webp_bin_hints}/libsharpyuv.dll)
+    if(_baktsiu_webp_dlls)
+        list(REMOVE_DUPLICATES _baktsiu_webp_dlls)
+        set(WEBP_DLLS "${_baktsiu_webp_dlls}" CACHE INTERNAL "libwebp runtime DLLs for post-build copy")
+    endif()
+endif()
+
+set(TIFF_LIBS "")
+set(TIFF_DLLS "")
+if(USE_TIFF)
+    set(_baktsiu_tiff_repo_default "${CMAKE_SOURCE_DIR}/third_party/libtiff")
+
+    set(TIFF_ROOT "" CACHE PATH "Root of libtiff dev tree (include/, lib/, bin/)")
+    set(TIFF_INCLUDE_DIR "" CACHE PATH "Directory containing tiffio.h")
+    set(TIFF_LIBRARY_DIR "" CACHE PATH "Directory containing tiff.lib")
+
+    if(TIFF_INCLUDE_DIR AND NOT EXISTS "${TIFF_INCLUDE_DIR}/tiffio.h")
+        unset(TIFF_INCLUDE_DIR CACHE)
+    endif()
+    if(TIFF_LIBRARY_DIR AND NOT EXISTS "${TIFF_LIBRARY_DIR}/tiff.lib")
+        unset(TIFF_LIBRARY_DIR CACHE)
+    endif()
+
+    if(EXISTS "${_baktsiu_tiff_repo_default}/include/tiffio.h")
+        set(TIFF_INCLUDE_DIR "${_baktsiu_tiff_repo_default}/include" CACHE PATH "Directory containing tiffio.h" FORCE)
+    elseif(TIFF_ROOT AND EXISTS "${TIFF_ROOT}/include/tiffio.h")
+        set(TIFF_INCLUDE_DIR "${TIFF_ROOT}/include" CACHE PATH "Directory containing tiffio.h" FORCE)
+    elseif(NOT TIFF_INCLUDE_DIR)
+        find_path(_baktsiu_tiff_include
+            NAMES tiffio.h
+            HINTS "${TIFF_ROOT}" ENV TIFF_ROOT
+            PATH_SUFFIXES include "")
+        if(_baktsiu_tiff_include)
+            set(TIFF_INCLUDE_DIR "${_baktsiu_tiff_include}" CACHE PATH "Directory containing tiffio.h" FORCE)
+        endif()
+    endif()
+
+    if(EXISTS "${_baktsiu_tiff_repo_default}/lib/tiff.lib")
+        set(TIFF_LIBRARY_DIR "${_baktsiu_tiff_repo_default}/lib" CACHE PATH "Directory containing tiff.lib" FORCE)
+    elseif(TIFF_ROOT AND EXISTS "${TIFF_ROOT}/lib/tiff.lib")
+        set(TIFF_LIBRARY_DIR "${TIFF_ROOT}/lib" CACHE PATH "Directory containing tiff.lib" FORCE)
+    elseif(NOT TIFF_LIBRARY_DIR)
+        find_path(_baktsiu_tiff_libdir
+            NAMES tiff.lib
+            HINTS "${TIFF_ROOT}/lib" "${TIFF_ROOT}" ENV TIFF_ROOT
+            PATH_SUFFIXES lib lib/x64 "")
+        if(_baktsiu_tiff_libdir)
+            set(TIFF_LIBRARY_DIR "${_baktsiu_tiff_libdir}" CACHE PATH "Directory containing tiff.lib" FORCE)
+        endif()
+    endif()
+
+    if(NOT TIFF_INCLUDE_DIR OR NOT TIFF_LIBRARY_DIR)
+        message(FATAL_ERROR
+            "USE_TIFF is ON but libtiff was not found.\n"
+            "  Install with vcpkg (tiff:x64-windows) and copy into third_party/libtiff\n"
+            "  or set TIFF_ROOT / TIFF_INCLUDE_DIR + TIFF_LIBRARY_DIR,\n"
+            "  or turn off TIFF: -DUSE_TIFF=OFF")
+    endif()
+
+    target_include_directories(${PROJECT_NAME} PRIVATE "${TIFF_INCLUDE_DIR}")
+    if(EXISTS "${TIFF_LIBRARY_DIR}/tiff.lib")
+        list(APPEND TIFF_LIBS "${TIFF_LIBRARY_DIR}/tiff.lib")
+    endif()
+    if(TIFF_LIBS STREQUAL "")
+        message(FATAL_ERROR "USE_TIFF: tiff.lib not found in TIFF_LIBRARY_DIR=${TIFF_LIBRARY_DIR}")
+    endif()
+
+    set(_baktsiu_tiff_bin_hints)
+    if(TIFF_ROOT)
+        list(APPEND _baktsiu_tiff_bin_hints "${TIFF_ROOT}/bin" "${TIFF_ROOT}")
+    endif()
+    list(APPEND _baktsiu_tiff_bin_hints "${_baktsiu_tiff_repo_default}/bin" "${_baktsiu_tiff_repo_default}")
+    if(TIFF_LIBRARY_DIR)
+        list(APPEND _baktsiu_tiff_bin_hints "${TIFF_LIBRARY_DIR}/../bin")
+    endif()
+    if(DEFINED ENV{TIFF_ROOT})
+        list(APPEND _baktsiu_tiff_bin_hints "$ENV{TIFF_ROOT}/bin" "$ENV{TIFF_ROOT}")
+    endif()
+    file(GLOB _baktsiu_tiff_dlls
+        LIST_DIRECTORIES false
+        ${_baktsiu_tiff_bin_hints}/tiff.dll
+        ${_baktsiu_tiff_bin_hints}/liblzma.dll
+        ${_baktsiu_tiff_bin_hints}/z.dll)
+    if(_baktsiu_tiff_dlls)
+        list(REMOVE_DUPLICATES _baktsiu_tiff_dlls)
+        set(TIFF_DLLS "${_baktsiu_tiff_dlls}" CACHE INTERNAL "libtiff runtime DLLs for post-build copy")
+    endif()
+endif()
+
+set(SVG_LIBS "")
+set(SVG_DLLS "")
+if(USE_SVG)
+    set(_baktsiu_svg_repo_default "${CMAKE_SOURCE_DIR}/third_party/lunasvg")
+
+    set(SVG_ROOT "" CACHE PATH "Root of lunasvg dev tree (include/, lib/, bin/)")
+    set(SVG_INCLUDE_DIR "" CACHE PATH "Directory containing lunasvg.h")
+    set(SVG_LIBRARY_DIR "" CACHE PATH "Directory containing lunasvg.lib")
+
+    if(SVG_INCLUDE_DIR AND NOT EXISTS "${SVG_INCLUDE_DIR}/lunasvg.h")
+        unset(SVG_INCLUDE_DIR CACHE)
+    endif()
+    if(SVG_LIBRARY_DIR AND NOT EXISTS "${SVG_LIBRARY_DIR}/lunasvg.lib")
+        unset(SVG_LIBRARY_DIR CACHE)
+    endif()
+
+    if(EXISTS "${_baktsiu_svg_repo_default}/include/lunasvg.h")
+        set(SVG_INCLUDE_DIR "${_baktsiu_svg_repo_default}/include" CACHE PATH "Directory containing lunasvg.h" FORCE)
+    elseif(SVG_ROOT AND EXISTS "${SVG_ROOT}/include/lunasvg.h")
+        set(SVG_INCLUDE_DIR "${SVG_ROOT}/include" CACHE PATH "Directory containing lunasvg.h" FORCE)
+    elseif(NOT SVG_INCLUDE_DIR)
+        find_path(_baktsiu_svg_include
+            NAMES lunasvg.h
+            HINTS "${SVG_ROOT}" ENV SVG_ROOT
+            PATH_SUFFIXES include "")
+        if(_baktsiu_svg_include)
+            set(SVG_INCLUDE_DIR "${_baktsiu_svg_include}" CACHE PATH "Directory containing lunasvg.h" FORCE)
+        endif()
+    endif()
+
+    if(EXISTS "${_baktsiu_svg_repo_default}/lib/lunasvg.lib")
+        set(SVG_LIBRARY_DIR "${_baktsiu_svg_repo_default}/lib" CACHE PATH "Directory containing lunasvg.lib" FORCE)
+    elseif(SVG_ROOT AND EXISTS "${SVG_ROOT}/lib/lunasvg.lib")
+        set(SVG_LIBRARY_DIR "${SVG_ROOT}/lib" CACHE PATH "Directory containing lunasvg.lib" FORCE)
+    elseif(NOT SVG_LIBRARY_DIR)
+        find_path(_baktsiu_svg_libdir
+            NAMES lunasvg.lib
+            HINTS "${SVG_ROOT}/lib" "${SVG_ROOT}" ENV SVG_ROOT
+            PATH_SUFFIXES lib lib/x64 "")
+        if(_baktsiu_svg_libdir)
+            set(SVG_LIBRARY_DIR "${_baktsiu_svg_libdir}" CACHE PATH "Directory containing lunasvg.lib" FORCE)
+        endif()
+    endif()
+
+    if(NOT SVG_INCLUDE_DIR OR NOT SVG_LIBRARY_DIR)
+        message(FATAL_ERROR
+            "USE_SVG is ON but lunasvg was not found.\n"
+            "  Install with vcpkg (lunasvg:x64-windows) and copy into third_party/lunasvg\n"
+            "  or set SVG_ROOT / SVG_INCLUDE_DIR + SVG_LIBRARY_DIR,\n"
+            "  or turn off SVG: -DUSE_SVG=OFF")
+    endif()
+
+    target_include_directories(${PROJECT_NAME} PRIVATE "${SVG_INCLUDE_DIR}")
+    if(EXISTS "${SVG_LIBRARY_DIR}/lunasvg.lib")
+        list(APPEND SVG_LIBS "${SVG_LIBRARY_DIR}/lunasvg.lib")
+    endif()
+    if(SVG_LIBS STREQUAL "")
+        message(FATAL_ERROR "USE_SVG: lunasvg.lib not found in SVG_LIBRARY_DIR=${SVG_LIBRARY_DIR}")
+    endif()
+
+    set(_baktsiu_svg_bin_hints)
+    if(SVG_ROOT)
+        list(APPEND _baktsiu_svg_bin_hints "${SVG_ROOT}/bin" "${SVG_ROOT}")
+    endif()
+    list(APPEND _baktsiu_svg_bin_hints "${_baktsiu_svg_repo_default}/bin" "${_baktsiu_svg_repo_default}")
+    if(SVG_LIBRARY_DIR)
+        list(APPEND _baktsiu_svg_bin_hints "${SVG_LIBRARY_DIR}/../bin")
+    endif()
+    if(DEFINED ENV{SVG_ROOT})
+        list(APPEND _baktsiu_svg_bin_hints "$ENV{SVG_ROOT}/bin" "$ENV{SVG_ROOT}")
+    endif()
+    file(GLOB _baktsiu_svg_dlls
+        LIST_DIRECTORIES false
+        ${_baktsiu_svg_bin_hints}/lunasvg.dll)
+    if(_baktsiu_svg_dlls)
+        list(REMOVE_DUPLICATES _baktsiu_svg_dlls)
+        set(SVG_DLLS "${_baktsiu_svg_dlls}" CACHE INTERNAL "lunasvg runtime DLLs for post-build copy")
+    endif()
+endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw spdlog ${GL_LIBS} ${OPENEXR_LIB} ${VIDEO_LIBS} ${JXL_LIBS} ${AVIF_LIBS} ${WEBP_LIBS} ${TIFF_LIBS} ${SVG_LIBS})
 
 if(WIN32 AND USE_VIDEO AND MPV_DLL)
     add_custom_command(
@@ -259,6 +610,38 @@ if(WIN32 AND USE_JXL AND JXL_DLLS)
         add_custom_command(
             TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_baktsiu_jxl_dll}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+    endforeach()
+endif()
+
+if(WIN32 AND USE_AVIF AND AVIF_DLLS)
+    foreach(_baktsiu_avif_dll ${AVIF_DLLS})
+        add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_baktsiu_avif_dll}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+    endforeach()
+endif()
+
+if(WIN32 AND USE_WEBP AND WEBP_DLLS)
+    foreach(_baktsiu_webp_dll ${WEBP_DLLS})
+        add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_baktsiu_webp_dll}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+    endforeach()
+endif()
+
+if(WIN32 AND USE_TIFF AND TIFF_DLLS)
+    foreach(_baktsiu_tiff_dll ${TIFF_DLLS})
+        add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_baktsiu_tiff_dll}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
+    endforeach()
+endif()
+
+if(WIN32 AND USE_SVG AND SVG_DLLS)
+    foreach(_baktsiu_svg_dll ${SVG_DLLS})
+        add_custom_command(
+            TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_baktsiu_svg_dll}" $<TARGET_FILE_DIR:${PROJECT_NAME}>)
     endforeach()
 endif()
 

@@ -17,9 +17,27 @@ option(EMBED_SHADERS "Embed shaders into binary" ON)
 if(WIN32)
     option(USE_VIDEO "Video playback via libmpv (OpenGL render)" ON)
     option(USE_JXL "JPEG XL (.jxl) via libjxl" ON)
+    option(USE_AVIF "AVIF (.avif) via libavif" ON)
+    option(USE_WEBP "WebP (.webp) via libwebp" ON)
+    option(USE_TIFF "TIFF (.tif/.tiff) via libtiff" ON)
+    option(USE_SVG "SVG (.svg) via lunasvg" ON)
+    option(USE_DDS "DDS (.dds) via gli (header-only)" ON)
 else()
     option(USE_VIDEO "Video playback via libmpv (OpenGL render)" OFF)
     option(USE_JXL "JPEG XL (.jxl) via libjxl" OFF)
+    option(USE_AVIF "AVIF (.avif) via libavif" OFF)
+    option(USE_WEBP "WebP (.webp) via libwebp" OFF)
+    option(USE_TIFF "TIFF (.tif/.tiff) via libtiff" OFF)
+    option(USE_SVG "SVG (.svg) via lunasvg" OFF)
+    option(USE_DDS "DDS (.dds) via gli (header-only)" OFF)
+endif()
+
+if(USE_DDS AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/gli/gli.hpp")
+    message(FATAL_ERROR
+        "USE_DDS is ON but gli was not found at ext/gli/gli.hpp.\n"
+        "Clone gli into ext/gli:\n"
+        "  git clone https://github.com/g-truc/gli.git ext/gli\n"
+        "or turn off DDS support: -DUSE_DDS=OFF")
 endif()
 
 if(USE_OPENEXR AND NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/ext/openexr/OpenEXR")

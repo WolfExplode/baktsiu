@@ -26,8 +26,6 @@ namespace baktsiu
 bool refPxToPixel(Vec2f refPx, Vec2f refSz, Vec2f actualSz, bool flipH, bool flipV, Vec2f& outPx);
 }
 
-}  // namespace baktsiu
-
 namespace
 {
 

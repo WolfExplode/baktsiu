@@ -95,24 +95,57 @@ void App::undoAction()
 
 void App::showImportImageDlg()
 {
-    static std::vector<std::string> filters = {
+    static std::vector<std::string> filters = []() {
+        std::string allExts = "*.bmp; *.exr; *.gif; *.ico; *.jpg; *.hdr; *.png; *.tga";
 #ifdef USE_JXL
-        "Supported Image Files", "*.bmp; *.exr; *.gif; *.jpg; *.jxl; *.hdr; *.png; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v" ,
-#else
-        "Supported Image Files", "*.bmp; *.exr; *.gif; *.jpg; *.hdr; *.png; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v" ,
+        allExts += "; *.jxl";
 #endif
-        "BMP (*.BMP)", "*.bmp",
-        "OpenEXR (*.EXR)", "*.exr",
-        "GIF (*.GIF)", "*.gif",
-        "JPEG (*.JPG, *.JPEG)", "*.jpg; *.jpeg",
+#ifdef USE_AVIF
+        allExts += "; *.avif";
+#endif
+#ifdef USE_WEBP
+        allExts += "; *.webp";
+#endif
+#ifdef USE_TIFF
+        allExts += "; *.tif; *.tiff";
+#endif
+#ifdef USE_SVG
+        allExts += "; *.svg";
+#endif
+        allExts += "; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v";
+
+        std::vector<std::string> f = {
+            "Supported Image Files", allExts,
+            "BMP (*.BMP)", "*.bmp",
+            "OpenEXR (*.EXR)", "*.exr",
+            "GIF (*.GIF)", "*.gif",
+            "ICO (*.ICO)", "*.ico",
+            "JPEG (*.JPG, *.JPEG)", "*.jpg; *.jpeg",
+        };
 #ifdef USE_JXL
-        "JPEG XL (*.JXL)", "*.jxl",
+        f.push_back("JPEG XL (*.JXL)"); f.push_back("*.jxl");
 #endif
-        "HDR (*.HDR)", "*.hdr",
-        "PNG (*.PNG)", "*.png",
-        "Video (*.MP4, *.MOV, ...)", "*.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v",
-        "Bak-Tsiu Session (*.BTS)", "*.bts",
-    };
+#ifdef USE_AVIF
+        f.push_back("AVIF (*.AVIF)"); f.push_back("*.avif");
+#endif
+#ifdef USE_WEBP
+        f.push_back("WebP (*.WEBP)"); f.push_back("*.webp");
+#endif
+#ifdef USE_TIFF
+        f.push_back("TIFF (*.TIF, *.TIFF)"); f.push_back("*.tif; *.tiff");
+#endif
+        f.insert(f.end(), {
+            "HDR (*.HDR)", "*.hdr",
+            "PNG (*.PNG)", "*.png",
+            "TGA (*.TGA)", "*.tga",
+#ifdef USE_SVG
+            "SVG (*.SVG)", "*.svg",
+#endif
+            "Video (*.MP4, *.MOV, ...)", "*.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v",
+            "Bak-Tsiu Session (*.BTS)", "*.bts",
+        });
+        return f;
+    }();
 
     std::vector<std::string> selection = pfd::open_file("Select image file(s)", "", filters, true).result();
     auto iter = selection.begin();
