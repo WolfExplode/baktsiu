@@ -32,6 +32,7 @@ uniform bool    uFlipImage1;
 uniform bool    uFlipImage2;
 uniform bool    uFlipImage1H;
 uniform bool    uFlipImage2H;
+uniform bool    uWrapAround;
 
 in  vec2 vUV;
 out vec4 oColor;
@@ -632,20 +633,26 @@ void main()
         return;
     }
 
-    // Add one extra pixel to draw the top and right pixel border.
-    vec2 regionMask = step(uOffset, wh) - step(uOffset + uImageSize + 1, wh);
-    if (regionMask.x * regionMask.y == 0.0) {
-        // When outside of image region, just draw background checker.
-        oColor.rgb = getCheckerColor(vUV, uWindowSize);
-        oColor = mix(oColor, vec4(1.0), vec4(isSplitter && showSplitter));
-        return;
+    if (!uWrapAround) {
+        // Add one extra pixel to draw the top and right pixel border.
+        vec2 regionMask = step(uOffset, wh) - step(uOffset + uImageSize + 1, wh);
+        if (regionMask.x * regionMask.y == 0.0) {
+            // When outside of image region, just draw background checker.
+            oColor.rgb = getCheckerColor(vUV, uWindowSize);
+            oColor = mix(oColor, vec4(1.0), vec4(isSplitter && showSplitter));
+            return;
+        }
     }
 
     vec2 refPx = (wh - uOffset) / uImageScale;
     vec2 uv1 = applyImageFlipUv(refPxToUvContain(refPx, uRefImageSize, uTex1Size), uFlipImage1H, uFlipImage1);
     vec2 uv2 = applyImageFlipUv(refPxToUvContain(refPx, uRefImageSize, uTex2Size), uFlipImage2H, uFlipImage2);
-    bool inside1 = uvInsideImage(uv1);
-    bool inside2 = uvInsideImage(uv2);
+    if (uWrapAround) {
+        uv1 = fract(uv1);
+        uv2 = fract(uv2);
+    }
+    bool inside1 = uWrapAround || uvInsideImage(uv1);
+    bool inside2 = uWrapAround || uvInsideImage(uv2);
     vec3 raw1 = inside1 ? texture(uImage1, uv1).rgb : vec3(0.0);
     vec3 raw2 = inside2 ? texture(uImage2, uv2).rgb : vec3(0.0);
 

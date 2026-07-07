@@ -856,6 +856,7 @@ void App::run(CompositeFlags initFlags)
             mPresentShader.setUniform("uFlipImage2", enableCompareView ? mFlipPresentMediaVert[1] : false);
             mPresentShader.setUniform("uFlipImage1H", mFlipPresentMediaHorz[0]);
             mPresentShader.setUniform("uFlipImage2H", enableCompareView ? mFlipPresentMediaHorz[1] : false);
+            mPresentShader.setUniform("uWrapAround", mWrapAroundMode);
             mPresentShader.setUniform("uCharUvRanges", mCharUvRanges);
             mPresentShader.setUniform("uCharUvXforms", mCharUvXforms);
             mPresentShader.setUniform("uPixelBorderHighlightColor", mPixelBorderHighlightColor);

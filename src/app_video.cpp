@@ -1336,6 +1336,7 @@ void App::renderVideoBlit(const ImGuiIO& io)
     mVideoBlitShader.setUniform("uFlipVideoR", cmp ? mFlipPresentMediaVert[1] : false);
     mVideoBlitShader.setUniform("uFlipVideoLH", mFlipPresentMediaHorz[0]);
     mVideoBlitShader.setUniform("uFlipVideoRH", cmp ? mFlipPresentMediaHorz[1] : false);
+    mVideoBlitShader.setUniform("uWrapAround", mWrapAroundMode);
     mVideoBlitShader.drawTriangle();
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, 0);

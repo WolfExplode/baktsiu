@@ -50,6 +50,9 @@ public:
     //! Change viewport size.
     void    resize(const Vec2f& size);
 
+    //! Enable/disable wrap-around (infinite tile) mode.
+    void    setWrapAround(bool enabled);
+
 private:
     //! When scale pivot is outside the image border, we have to
     //! restrict the position of pivot to make scaled image visible
@@ -68,6 +71,7 @@ private:
     Vec2f   mImageSize = Vec2f(1.0f);
     Vec2f   mImageScalePivot = Vec2f(0.0f);
     float   mImageScale = 1.0f;
+    bool    mWrapAround = false;
 };
 
 } // namespace baktsiu

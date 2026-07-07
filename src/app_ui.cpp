@@ -478,6 +478,14 @@ void    App::renderToolbar()
     }
 
     ImGui::SameLine();
+    if (ToggleButton(ICON_FA_TH "##WrapAround", &mWrapAroundMode, buttonSize)) {
+        mView.setWrapAround(mWrapAroundMode);
+        mColumnViews[0].setWrapAround(mWrapAroundMode);
+        mColumnViews[1].setWrapAround(mWrapAroundMode);
+    }
+    if (ImGui::IsItemHovered()) { ImGui::SetTooltip("Wrap Around / Tile Mode"); }
+
+    ImGui::SameLine();
     mCenteredToolbarWidth = g.CurrentWindow->DC.CursorPos.x - centeredToolBeginPos;
 
     // Show buttons at right hand side.

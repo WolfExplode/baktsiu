@@ -393,6 +393,7 @@ private:
     bool        mUseLinearFilter = false;
     bool        mShowImageNameOverlay = true;
     bool        mShowPixelMarker = false;
+    bool        mWrapAroundMode = false;
     bool        mSupportComputeShader = false;
     bool        mUpdateImageSelection = false;
 

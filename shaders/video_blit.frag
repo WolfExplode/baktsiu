@@ -33,6 +33,7 @@ uniform bool uFlipVideoL;
 uniform bool uFlipVideoR;
 uniform bool uFlipVideoLH;
 uniform bool uFlipVideoRH;
+uniform bool uWrapAround;
 
 in vec2 vUV;
 out vec4 oColor;
@@ -377,9 +378,10 @@ vec4 sampleVideoZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, ve
 {
     vec2 refPx = (wh - offset) / max(imageScale, 1e-5);
     vec2 uv = refPxToUvContain(refPx, refSz, texSz);
-    if (!uvInsideImage(uv)) {
+    if (!uWrapAround && !uvInsideImage(uv)) {
         return kLetterbox;
     }
+    if (uWrapAround) { uv = fract(uv); }
     vec4 t = texture(tex, videoTexGlUv(uv, flipHorizontal, flipVertical));
     t.rgb = mapVideoToDisplay(t.rgb);
     return t;
@@ -390,9 +392,10 @@ bool videoFetchEncZoomed(sampler2D tex, vec2 wh, vec2 offset, float imageScale, 
 {
     vec2 refPx = (wh - offset) / max(imageScale, 1e-5);
     vec2 uv = refPxToUvContain(refPx, refSz, texSz);
-    if (!uvInsideImage(uv)) {
+    if (!uWrapAround && !uvInsideImage(uv)) {
         return false;
     }
+    if (uWrapAround) { uv = fract(uv); }
     encRgb = texture(tex, videoTexGlUv(uv, flipHorizontal, flipVertical)).rgb;
     return true;
 }
@@ -438,8 +441,9 @@ void main()
                     vec2 dispR = refContainDisp(uVideoRefSize, uVideoSizeR);
                     vec2 deltaUV2 = round(uVideoRelativeOffset) / max(dispR * uVideoImageScale, vec2(1e-6));
                     vec2 uvR = refPxToUvContain(refPx, uVideoRefSize, uVideoSizeR) - deltaUV2;
-                    okL = uvInsideImage(uvL);
-                    okR = uvInsideImage(uvR);
+                    okL = uWrapAround || uvInsideImage(uvL);
+                    okR = uWrapAround || uvInsideImage(uvR);
+                    if (uWrapAround) { uvL = fract(uvL); uvR = fract(uvR); }
                     if (okL) {
                         encL = texture(uVideo, videoTexGlUv(uvL, uFlipVideoLH, uFlipVideoL)).rgb;
                     }
@@ -454,8 +458,9 @@ void main()
                     vec2 disp1 = refContainDisp(uVideoRefSize, uVideoSize);
                     vec2 deltaUV1 = round(uVideoRelativeOffset) / max(disp1 * uVideoImageScale, vec2(1e-6));
                     vec2 uvL = refPxToUvContain(refPx, uVideoRefSize, uVideoSize) + deltaUV1;
-                    okL = uvInsideImage(uvL);
-                    okR = uvInsideImage(uvR);
+                    okL = uWrapAround || uvInsideImage(uvL);
+                    okR = uWrapAround || uvInsideImage(uvR);
+                    if (uWrapAround) { uvL = fract(uvL); uvR = fract(uvR); }
                     if (okL) {
                         encL = texture(uVideo, videoTexGlUv(uvL, uFlipVideoLH, uFlipVideoL)).rgb;
                     }

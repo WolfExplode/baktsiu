@@ -141,6 +141,10 @@ Vec2f   View::getConstrainedPivot(Vec2f pivot) const
 
 void    View::restrictTranslation()
 {
+    if (mWrapAround) {
+        return;
+    }
+
     const Vec2f imageOffset = getImageOffset();
     const Vec2f scaledImageSize = mImageSize * mImageScale;
 
@@ -155,6 +159,11 @@ void    View::restrictTranslation()
 
     mTransform[2][0] += coffset.x;
     mTransform[2][1] += coffset.y;
+}
+
+void    View::setWrapAround(bool enabled)
+{
+    mWrapAround = enabled;
 }
 
 Vec2f   View::getVisibleSize() const
