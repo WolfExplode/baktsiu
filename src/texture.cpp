@@ -32,16 +32,17 @@
 #include <webp/decode.h>
 #endif
 
+#ifdef USE_DDS
+// Before tiffio.h: libtiff's deprecated global uint8/uint32 typedefs trip C4996 inside gli.
+#include <gli/gli.hpp>
+#endif
+
 #ifdef USE_TIFF
 #include <tiffio.h>
 #endif
 
 #ifdef USE_SVG
 #include <lunasvg.h>
-#endif
-
-#ifdef USE_DDS
-#include <gli/gli.hpp>
 #endif
 
 namespace baktsiu
@@ -204,7 +205,28 @@ class DdsTexture final : public Texture
 public:
     bool loadFromFile(const std::string& filepath) override
     {
-        gli::texture2d tex(gli::load_dds(filepath));
+        // Read through stbi__fopen so UTF-8 paths work on Windows (gli uses plain fopen).
+        std::vector<char> bytes;
+        FILE* f = stbi__fopen(filepath.c_str(), "rb");
+        if (!f) {
+            return false;
+        }
+        if (fseek(f, 0, SEEK_END) == 0) {
+            const long size = ftell(f);
+            if (size > 0 && fseek(f, 0, SEEK_SET) == 0) {
+                bytes.resize(static_cast<size_t>(size));
+                if (fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) {
+                    bytes.clear();
+                }
+            }
+        }
+        fclose(f);
+        if (bytes.empty()) {
+            return false;
+        }
+
+        // Cubemaps and arrays: only the first face/layer is shown.
+        gli::texture2d tex(gli::load_dds(bytes.data(), bytes.size()));
         if (tex.empty()) {
             return false;
         }
@@ -243,8 +265,26 @@ public:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mGliTex.levels() - 1));
 
         gli::gl GL(gli::gl::PROFILE_GL33);
-        const gli::gl::format fmt = GL.translate(mGliTex.format(), mGliTex.swizzles());
+        gli::gl::format fmt = GL.translate(mGliTex.format(), mGliTex.swizzles());
         const gli::texture2d::extent_type ext0 = mGliTex.extent(0);
+
+        // Other images are uploaded as plain RGBA8 and sampled without sRGB decoding,
+        // so use the UNORM equivalent of sRGB formats to display them consistently.
+        switch (fmt.Internal) {
+        case gli::gl::INTERNAL_SRGB8:            fmt.Internal = gli::gl::INTERNAL_RGB8_UNORM; break;
+        case gli::gl::INTERNAL_SRGB8_ALPHA8:     fmt.Internal = gli::gl::INTERNAL_RGBA8_UNORM; break;
+        case gli::gl::INTERNAL_SRGB_DXT1:        fmt.Internal = gli::gl::INTERNAL_RGB_DXT1; break;
+        case gli::gl::INTERNAL_SRGB_ALPHA_DXT1:  fmt.Internal = gli::gl::INTERNAL_RGBA_DXT1; break;
+        case gli::gl::INTERNAL_SRGB_ALPHA_DXT3:  fmt.Internal = gli::gl::INTERNAL_RGBA_DXT3; break;
+        case gli::gl::INTERNAL_SRGB_ALPHA_DXT5:  fmt.Internal = gli::gl::INTERNAL_RGBA_DXT5; break;
+        case gli::gl::INTERNAL_SRGB_BP_UNORM:    fmt.Internal = gli::gl::INTERNAL_RGB_BP_UNORM; break;
+        default: break;
+        }
+
+        // Luminance/alpha formats map to R/RG textures plus a swizzle.
+        const GLint swizzle[4] = {fmt.Swizzles[0], fmt.Swizzles[1], fmt.Swizzles[2], fmt.Swizzles[3]};
+        glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzle);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
         glTexStorage2D(GL_TEXTURE_2D, static_cast<GLint>(mGliTex.levels()), fmt.Internal, ext0.x, ext0.y);
 

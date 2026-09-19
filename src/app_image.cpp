@@ -112,6 +112,9 @@ void App::showImportImageDlg()
 #ifdef USE_SVG
         allExts += "; *.svg";
 #endif
+#ifdef USE_DDS
+        allExts += "; *.dds";
+#endif
         allExts += "; *.bts; *.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v";
 
         std::vector<std::string> f = {
@@ -140,6 +143,9 @@ void App::showImportImageDlg()
             "TGA (*.TGA)", "*.tga",
 #ifdef USE_SVG
             "SVG (*.SVG)", "*.svg",
+#endif
+#ifdef USE_DDS
+            "DirectDraw Surface (*.DDS)", "*.dds",
 #endif
             "Video (*.MP4, *.MOV, ...)", "*.mp4; *.mov; *.wmv; *.avi; *.mkv; *.webm; *.m4v",
             "Bak-Tsiu Session (*.BTS)", "*.bts",

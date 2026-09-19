@@ -35,7 +35,10 @@ endif()
 
 if(USE_DDS)
     add_definitions(-DUSE_DDS)
-    # gli is header-only; ext/ is already in EXT_INCLUDE_DIRS
+    # gli is header-only but needs a newer glm (0.9.9.9) than ext/glm, so use the one
+    # bundled with gli for the whole target to keep a single glm version.
+    include_directories(BEFORE "${PROJECT_SOURCE_DIR}/ext/gli/external")
+    include_directories("${PROJECT_SOURCE_DIR}/ext/gli")
 endif()
 
 if(WIN32 AND USE_VIDEO)

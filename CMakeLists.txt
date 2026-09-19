@@ -32,11 +32,11 @@ else()
     option(USE_DDS "DDS (.dds) via gli (header-only)" OFF)
 endif()
 
-if(USE_DDS AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/gli/gli.hpp")
+if(USE_DDS AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ext/gli/gli/gli.hpp")
     message(FATAL_ERROR
-        "USE_DDS is ON but gli was not found at ext/gli/gli.hpp.\n"
-        "Clone gli into ext/gli:\n"
-        "  git clone https://github.com/g-truc/gli.git ext/gli\n"
+        "USE_DDS is ON but gli was not found at ext/gli/gli/gli.hpp.\n"
+        "Fetch the gli submodule:\n"
+        "  git submodule update --init ext/gli\n"
         "or turn off DDS support: -DUSE_DDS=OFF")
 endif()
 

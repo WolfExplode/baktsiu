@@ -118,6 +118,7 @@ Numerical [approximation](https://github.com/shihchinw/numex/blob/master/noteboo
 ## Supported Image Formats
 
 * BMP
+* DDS (BC1–BC7 and uncompressed formats; cubemaps/arrays show the first face/layer)
 * GIF
 * HDR
 * JPG
