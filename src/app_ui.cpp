@@ -414,7 +414,7 @@ void    App::renderToolbar()
     }
 
     ImGui::SameLine();
-    const char* presentModes[] = { "RGB", "R", "G", "B", "Luminance", "CIE L*", "CIE a*", "CIE b*" };
+    const char* presentModes[] = { "RGB", "R", "G", "B", "Luminance", "CIE L*", "CIE a*", "CIE b*", "Alpha" };
     if (ImGui::BeginCombo("##Channel", presentModes[mCurrentPresentMode]))
     {
         for (int i = 0; i < IM_ARRAYSIZE(presentModes); i++) {

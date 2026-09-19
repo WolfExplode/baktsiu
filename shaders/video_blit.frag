@@ -255,6 +255,8 @@ vec3 colorTransform(vec3 color, int mode)
         vec3 lab = XYZtoLab(mul(AP1_2_XYZ_MAT, color));
         color = ((lab - labMin) / (labMax - labMin));
         color = vec3(color[mode - 5]);
+    } else if (mode == 8) {
+        color = vec3(1.0); // Video frames are opaque.
     }
     return color;
 }
